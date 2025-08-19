@@ -25,13 +25,13 @@ class Test1 {
             
 
             val data =async {
-//                delay(2000)
+                delay(2000)
                 println("ceshi***3-${count}--${Thread.currentThread().name}")
                 40
             }
 
             val result=async {
-//                delay(3000)
+                delay(3000)
                 println("ceshi***4-${count}--${Thread.currentThread().name}")
                 3
             }
@@ -41,13 +41,4 @@ class Test1 {
         println("fsdf--${Thread.currentThread().name}")
     }
 
-    fun test1(call: suspend List<String>.() -> Unit) {
-        val list = List<String>(6) { b ->
-            "dfsdf${b}"
-        }
-        CoroutineScope(Dispatchers.IO).launch {
-            delay(1000)
-            call(list)
-        }
-    }
 }
