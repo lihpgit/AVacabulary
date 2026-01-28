@@ -2,6 +2,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
     <application
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
@@ -12,6 +14,11 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.TestApplication"
         tools:targetApi="31">
+        <service
+            android:name=".IpcService"
+            android:enabled="true"
+            android:exported="true"></service>
+
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -23,6 +30,12 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <activity android:name=".NoiseActivity" android:exported="false" android:label="噪音测试" />
+        <activity android:name=".FlashlightActivity" android:exported="false" android:label="闪光灯测试" />
+        <activity android:name=".tetris.TetrisActivity" android:exported="false" android:label="俄罗斯方块" android:screenOrientation="portrait" />
+        <activity android:name=".RootTestActivity" android:exported="false" android:label="Root测试" />
+        <activity android:name=".DatabaseViewerActivity" android:exported="false" android:label="数据库查看器" />
+        <activity android:name=".ClipboardMonitorActivity" android:exported="false" android:label="剪贴板监控" />
     </application>
 
 </manifest>
