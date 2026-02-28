@@ -73,4 +73,11 @@ dependencies {
     androidTestImplementation(libs.androidx.ui.test.junit4)
     debugImplementation(libs.androidx.ui.tooling)
     debugImplementation(libs.androidx.ui.test.manifest)
+    compileOnly("de.robv.android.xposed:api:82")
+//    compileOnly("de.robv.android.xposed:api:82:sources")
+}
+
+// 兼容 Java 工具链：部分 IDE/扩展会调用 testClasses，Android 项目默认无此任务
+tasks.register("testClasses") {
+    dependsOn("compileDebugUnitTestKotlin")
 }

@@ -18,6 +18,11 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 
+import androidx.compose.ui.platform.LocalTextToolbar
+import androidx.compose.ui.platform.TextToolbar
+import androidx.compose.ui.platform.TextToolbarStatus
+import androidx.compose.ui.geometry.Rect
+
 class ClipboardMonitorActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -40,33 +45,68 @@ fun ClipboardMonitorView() {
     }
 }
 
+
 @Composable
 fun ComposeClipboardMonitor() {
     val context = LocalContext.current
-    // 监听粘贴：通过自定义 TextFieldValue 的变动来推测（Compose 没有直接的 OnPasteListener）
-    // 或者监听 ClipboardManager 的变化
-    
     var text by remember { mutableStateOf(TextFieldValue("")) }
     var log by remember { mutableStateOf("日志: ") }
     
-    // 1. 监听复制：使用 LocalClipboardManager
-    // 注意：Compose 的 SelectionContainer 默认处理了复制，但要监听 "复制事件" 比较难，
-    // 通常是自定义 Action 或者监听系统剪贴板变化
     val clipboardManager = LocalClipboardManager.current
+    val originalToolbar = LocalTextToolbar.current
     
-    // 简单的文本输入框
-    OutlinedTextField(
-        value = text,
-        onValueChange = { newValue ->
-            // 简单的粘贴检测逻辑：一次性增加大量字符
-            if (newValue.text.length - text.text.length > 5) {
-                log += "\n检测到疑似粘贴行为 (Compose)"
+    // 自定义 Toolbar 拦截复制操作
+    val spyToolbar = remember(originalToolbar) {
+        object : TextToolbar {
+            override val status: TextToolbarStatus
+                get() = originalToolbar.status
+
+            override fun hide() {
+                originalToolbar.hide()
             }
-            text = newValue
-        },
-        label = { Text("尝试在此输入或粘贴") },
-        modifier = Modifier.fillMaxWidth()
-    )
+
+            override fun showMenu(
+                rect: Rect,
+                onCopyRequested: (() -> Unit)?,
+                onPasteRequested: (() -> Unit)?,
+                onCutRequested: (() -> Unit)?,
+                onSelectAllRequested: (() -> Unit)?
+            ) {
+                originalToolbar.showMenu(
+                    rect = rect,
+                    onCopyRequested = {
+                        onCopyRequested?.invoke()
+                        log += "\n检测到原生菜单复制 (Compose)"
+                    },
+                    onPasteRequested = {
+                        onPasteRequested?.invoke()
+                        log += "\n检测到原生菜单粘贴 (Compose)"
+                    },
+                    onCutRequested = {
+                        onCutRequested?.invoke()
+                        log += "\n检测到原生菜单剪切 (Compose)"
+                    },
+                    onSelectAllRequested = onSelectAllRequested
+                )
+            }
+        }
+    }
+    
+    CompositionLocalProvider(LocalTextToolbar provides spyToolbar) {
+        // 简单的文本输入框
+        OutlinedTextField(
+            value = text,
+            onValueChange = { newValue ->
+                // 简单的粘贴检测逻辑：一次性增加大量字符
+                if (newValue.text.length - text.text.length > 5) {
+                    log += "\n检测到疑似粘贴行为 (文本突增)"
+                }
+                text = newValue
+            },
+            label = { Text("尝试在此输入或粘贴") },
+            modifier = Modifier.fillMaxWidth()
+        )
+    }
     
     Button(
         onClick = {

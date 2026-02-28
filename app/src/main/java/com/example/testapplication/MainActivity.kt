@@ -107,6 +107,27 @@ class MainActivity : ComponentActivity() {
                     ) {
                         Text("去监控剪贴板")
                     }
+
+                    Button(
+                        onClick = { startActivity(Intent(this@MainActivity, LightSensorActivity::class.java)) },
+                        modifier = Modifier.padding(4.dp)
+                    ) {
+                        Text("去测光感")
+                    }
+
+                    Button(
+                        onClick = { startActivity(Intent(this@MainActivity, IrRemoteActivity::class.java)) },
+                        modifier = Modifier.padding(4.dp)
+                    ) {
+                        Text("红外遥控")
+                    }
+
+                    Button(
+                        onClick = { startActivity(Intent(this@MainActivity, NetworkSpeedActivity::class.java)) },
+                        modifier = Modifier.padding(4.dp)
+                    ) {
+                        Text("网络测速")
+                    }
                 }
             }
         }
