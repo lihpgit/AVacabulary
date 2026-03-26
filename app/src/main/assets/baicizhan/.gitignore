@@ -1,0 +1,11 @@
+# 百词斩数据库文件较大，不纳入版本控制
+# 部署时手动将以下文件放入此目录：
+#   lookup.db
+#   baicizhantopicproblem.db
+#   roadmap/road_map_*.baicizhan
+*
+!.gitignore
+!README.txt
+!roadmap/
+roadmap/*
+!roadmap/.gitkeep

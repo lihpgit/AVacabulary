@@ -7,8 +7,8 @@ package com.example.testapplication.vocab
  */
 enum class WordBook(val id: Int, val displayName: String) {
     GAOKAO(409, "高考"),
-    CET4(408, "四级"),   // 如不对请改成实际 ID
-    CET6(410, "六级");   // 如不对请改成实际 ID
+    CET4(201, "四级"),
+    CET6(202, "六级");
 
     val roadmapFileName get() = "road_map_$id.baicizhan"
     val statusTableName  get() = "ts_learn_offline_dotopic_sync_ids_$id"

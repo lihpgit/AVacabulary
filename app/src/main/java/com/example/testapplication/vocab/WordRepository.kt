@@ -2,7 +2,6 @@ package com.example.testapplication.vocab
 
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
-import com.example.testapplication.RootUtils
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -28,8 +27,6 @@ class WordRepository private constructor(private val appContext: Context) {
 
     companion object {
         private const val PREFS_NAME = "word_overrides"
-        private const val SDCARD_STATUS_DB =
-            "/sdcard/Android/data/com.jiongji.andriod.card/files/baicizhan/baicizhantopicproblem.db"
 
         @Volatile
         private var INSTANCE: WordRepository? = null
@@ -40,7 +37,6 @@ class WordRepository private constructor(private val appContext: Context) {
             }
     }
 
-    // filesDir/baicizhan/ 是运行时数据目录，assets 内容首次运行时复制过来
     private val baseDir    get() = File(appContext.filesDir, "baicizhan")
     private val lookupFile get() = File(baseDir, "lookup.db")
     private val statusFile get() = File(baseDir, "baicizhantopicproblem.db")
@@ -55,7 +51,6 @@ class WordRepository private constructor(private val appContext: Context) {
     private val _overrides = MutableStateFlow<Map<Int, Boolean>>(emptyMap())
     val overrides: StateFlow<Map<Int, Boolean>> = _overrides
 
-    // 每本词书加载后缓存，切换词书无需重复 IO
     private val wordCache = mutableMapOf<WordBook, List<Word>>()
 
     init {
@@ -85,9 +80,9 @@ class WordRepository private constructor(private val appContext: Context) {
                 if (!lookupFile.exists())
                     throw Exception("lookup.db 未找到，请将其放入 assets/baicizhan/")
 
-                val topicIds  = parseRoadmap(roadmap)
+                val topicIds   = parseRoadmap(roadmap)
                 val masteryMap = readMasteryStatus(book)
-                val wordMap   = readWordDetails(topicIds.toHashSet())
+                val wordMap    = readWordDetails(topicIds.toHashSet())
 
                 val words = topicIds.mapNotNull { id ->
                     val d = wordMap[id] ?: return@mapNotNull null
@@ -112,21 +107,29 @@ class WordRepository private constructor(private val appContext: Context) {
     }
 
     /**
-     * 从百词斩 sdcard 目录同步 baicizhantopicproblem.db（需要 Root）。
-     * 同步成功后清空缓存，调用方应重新调用 loadWords()。
+     * 把 assets 里的数据库文件强制重新覆盖到 filesDir。
+     * 适用场景：将新的 DB 文件放入 assets 重新打包安装后，点此按钮刷新。
      */
-    suspend fun syncFromBaicizhan() {
+    suspend fun syncFromAssets() {
         _syncState.value = SyncState.Syncing
         withContext(Dispatchers.IO) {
             try {
                 baseDir.mkdirs()
-                RootUtils.execRootCmd("cp \"$SDCARD_STATUS_DB\" \"${statusFile.absolutePath}\"")
-                RootUtils.execRootCmd("chmod 666 \"${statusFile.absolutePath}\"")
+                File(baseDir, "roadmap").mkdirs()
 
-                if (!statusFile.exists() || statusFile.length() == 0L)
-                    throw Exception("同步失败，确认百词斩已安装且本应用有 Root 权限")
+                forceCopyAsset("baicizhan/lookup.db", lookupFile)
+                forceCopyAsset("baicizhan/baicizhantopicproblem.db", statusFile)
 
-                wordCache.clear()   // 清缓存，下次 loadWords 重新计算状态
+                try {
+                    appContext.assets.list("baicizhan/roadmap")?.forEach { name ->
+                        forceCopyAsset("baicizhan/roadmap/$name", File(baseDir, "roadmap/$name"))
+                    }
+                } catch (_: Exception) {}
+
+                if (!lookupFile.exists() || lookupFile.length() == 0L)
+                    throw Exception("assets/baicizhan/lookup.db 不存在或为空，请先将数据库文件放入 assets 目录")
+
+                wordCache.clear()
                 _syncState.value = SyncState.Success
             } catch (e: Exception) {
                 _syncState.value = SyncState.Error(e.message ?: "同步失败")
@@ -140,15 +143,15 @@ class WordRepository private constructor(private val appContext: Context) {
 
     // ── 内部：资源提取 ──────────────────────────────────────────────
 
-    /** 首次运行时把 assets 里的 DB 复制到 filesDir（后续直接用本地文件） */
+    /** 首次运行（或文件缺失）时从 assets 复制到 filesDir */
     private fun ensureAssetsExtracted() {
         baseDir.mkdirs()
         File(baseDir, "roadmap").mkdirs()
 
+        // 文件存在且大于 0 才跳过，防止旧版本遗留空文件
         copyAssetIfMissing("baicizhan/lookup.db", lookupFile)
         copyAssetIfMissing("baicizhan/baicizhantopicproblem.db", statusFile)
 
-        // 复制所有 roadmap 文件
         try {
             appContext.assets.list("baicizhan/roadmap")?.forEach { name ->
                 copyAssetIfMissing("baicizhan/roadmap/$name", File(baseDir, "roadmap/$name"))
@@ -156,13 +159,19 @@ class WordRepository private constructor(private val appContext: Context) {
         } catch (_: Exception) {}
     }
 
+    /** 仅当目标文件不存在或为空时才复制 */
     private fun copyAssetIfMissing(assetPath: String, dest: File) {
-        if (dest.exists()) return
+        if (dest.exists() && dest.length() > 0L) return
+        forceCopyAsset(assetPath, dest)
+    }
+
+    /** 无条件从 assets 覆盖复制 */
+    private fun forceCopyAsset(assetPath: String, dest: File) {
         try {
             appContext.assets.open(assetPath).use { src ->
                 dest.outputStream().use { dst -> src.copyTo(dst) }
             }
-        } catch (_: Exception) { /* asset 不存在则跳过 */ }
+        } catch (_: Exception) {}
     }
 
     // ── 内部：DB 读取 ──────────────────────────────────────────────

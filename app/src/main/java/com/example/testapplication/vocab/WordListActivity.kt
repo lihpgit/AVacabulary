@@ -70,13 +70,13 @@ fun WordListScreen() {
     if (showSyncDialog) {
         AlertDialog(
             onDismissRequest = { showSyncDialog = false },
-            title = { Text("从百词斩同步学习状态") },
-            text  = { Text("将用百词斩 App 的最新数据覆盖本地「已斩/未斩」记录（需要 Root 权限）。\n\n你手动调整过的状态也会被覆盖，确认继续？") },
+            title = { Text("重新加载内置词库") },
+            text  = { Text("将把 assets 目录内的数据库文件重新覆盖到本地存储，适用于你更新了 assets 内的 DB 文件并重新安装 App 后。\n\n你手动调整过的已斩/未斩状态不受影响。确认继续？") },
             confirmButton = {
                 TextButton(onClick = {
                     showSyncDialog = false
-                    scope.launch { repository.syncFromBaicizhan() }
-                }) { Text("确认同步") }
+                    scope.launch { repository.syncFromAssets() }
+                }) { Text("确认") }
             },
             dismissButton = {
                 TextButton(onClick = { showSyncDialog = false }) { Text("取消") }
@@ -121,7 +121,7 @@ fun WordListScreen() {
                         )
                     } else {
                         TextButton(onClick = { showSyncDialog = true }) {
-                            Text("从百词斩同步")
+                            Text("重载词库")
                         }
                     }
                     IconButton(onClick = {
