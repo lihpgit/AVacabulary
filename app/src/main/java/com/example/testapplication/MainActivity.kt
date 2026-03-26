@@ -19,6 +19,7 @@ import androidx.compose.material3.Text
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.example.testapplication.tetris.TetrisActivity
+import com.example.testapplication.vocab.WordListActivity
 
 @OptIn(ExperimentalLayoutApi::class)
 class MainActivity : ComponentActivity() {
@@ -127,6 +128,13 @@ class MainActivity : ComponentActivity() {
                         modifier = Modifier.padding(4.dp)
                     ) {
                         Text("网络测速")
+                    }
+
+                    Button(
+                        onClick = { startActivity(Intent(this@MainActivity, WordListActivity::class.java)) },
+                        modifier = Modifier.padding(4.dp)
+                    ) {
+                        Text("背单词")
                     }
                 }
             }

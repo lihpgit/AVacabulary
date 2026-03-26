@@ -80,6 +80,8 @@
         <activity android:name=".LightSensorActivity" android:exported="false" android:label="光感测试" />
         <activity android:name=".IrRemoteActivity" android:exported="false" android:label="红外遥控" />
         <activity android:name=".NetworkSpeedActivity" android:exported="false" android:label="网络测速" />
+        <activity android:name=".vocab.WordListActivity" android:exported="false" android:label="背单词" />
+        <activity android:name=".vocab.FlashCardActivity" android:exported="false" android:label="刷词" android:screenOrientation="portrait" />
     </application>
 
 </manifest>
