@@ -37,15 +37,18 @@ fun WordListScreen() {
     val scope = rememberCoroutineScope()
     val repository = remember { WordRepository.getInstance(context) }
 
-    val loadState by repository.loadState.collectAsState()
-    val overrides by repository.overrides.collectAsState()
+    val loadState  by repository.loadState.collectAsState()
+    val syncState  by repository.syncState.collectAsState()
+    val overrides  by repository.overrides.collectAsState()
 
-    var selectedTab by remember { mutableIntStateOf(0) }
-    var searchQuery by remember { mutableStateOf("") }
+    var selectedBook by remember { mutableStateOf(WordBook.GAOKAO) }
+    var selectedTab  by remember { mutableIntStateOf(0) }
+    var searchQuery  by remember { mutableStateOf("") }
+    var showSyncDialog by remember { mutableStateOf(false) }
 
-    // Trigger load on first open
-    LaunchedEffect(Unit) {
-        if (loadState is LoadState.Idle) repository.loadWords()
+    // 加载词书（切换词书时重新加载）
+    LaunchedEffect(selectedBook) {
+        repository.loadWords(selectedBook)
     }
 
     val allWords = (loadState as? LoadState.Success)?.words ?: emptyList()
@@ -59,12 +62,47 @@ fun WordListScreen() {
     val displayList = remember(baseList, searchQuery) {
         if (searchQuery.isBlank()) baseList
         else baseList.filter {
-            it.word.contains(searchQuery, ignoreCase = true) ||
-                    it.meanCn.contains(searchQuery)
+            it.word.contains(searchQuery, ignoreCase = true) || it.meanCn.contains(searchQuery)
+        }
+    }
+
+    // ── 同步确认对话框 ──────────────────────────────────────────
+    if (showSyncDialog) {
+        AlertDialog(
+            onDismissRequest = { showSyncDialog = false },
+            title = { Text("从百词斩同步学习状态") },
+            text  = { Text("将用百词斩 App 的最新数据覆盖本地「已斩/未斩」记录（需要 Root 权限）。\n\n你手动调整过的状态也会被覆盖，确认继续？") },
+            confirmButton = {
+                TextButton(onClick = {
+                    showSyncDialog = false
+                    scope.launch { repository.syncFromBaicizhan() }
+                }) { Text("确认同步") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showSyncDialog = false }) { Text("取消") }
+            }
+        )
+    }
+
+    // 同步结果 Snackbar
+    val snackbarHostState = remember { SnackbarHostState() }
+    LaunchedEffect(syncState) {
+        when (val s = syncState) {
+            is SyncState.Success -> {
+                repository.loadWords(selectedBook, forceReload = true)
+                snackbarHostState.showSnackbar("同步成功，已重新加载")
+                repository.resetSyncState()
+            }
+            is SyncState.Error -> {
+                snackbarHostState.showSnackbar("同步失败：${s.message}")
+                repository.resetSyncState()
+            }
+            else -> {}
         }
     }
 
     Scaffold(
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             TopAppBar(
                 title = { Text("背单词") },
@@ -74,91 +112,117 @@ fun WordListScreen() {
                     }
                 },
                 actions = {
-                    IconButton(onClick = {
-                        scope.launch {
-                            repository.loadWords()
+                    if (syncState is SyncState.Syncing) {
+                        CircularProgressIndicator(
+                            modifier = Modifier
+                                .size(32.dp)
+                                .padding(end = 8.dp),
+                            strokeWidth = 2.dp
+                        )
+                    } else {
+                        TextButton(onClick = { showSyncDialog = true }) {
+                            Text("从百词斩同步")
                         }
+                    }
+                    IconButton(onClick = {
+                        scope.launch { repository.loadWords(selectedBook, forceReload = true) }
                     }) {
-                        Icon(Icons.Filled.Refresh, contentDescription = "刷新")
+                        Icon(Icons.Filled.Refresh, contentDescription = "重新加载")
                     }
                 }
             )
         }
     ) { padding ->
         Column(modifier = Modifier.padding(padding).fillMaxSize()) {
-            // Search bar
+
+            // ── 词书选择 ────────────────────────────────────────
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                WordBook.entries.forEach { book ->
+                    FilterChip(
+                        selected = selectedBook == book,
+                        onClick  = {
+                            if (selectedBook != book) {
+                                selectedBook = book
+                                selectedTab  = 0
+                                searchQuery  = ""
+                            }
+                        },
+                        label = { Text(book.displayName) }
+                    )
+                }
+            }
+
+            // ── 搜索框 ──────────────────────────────────────────
             OutlinedTextField(
                 value = searchQuery,
                 onValueChange = { searchQuery = it },
-                placeholder = { Text("搜索单词或释义...") },
+                placeholder = { Text("搜索单词或释义…") },
                 singleLine = true,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 4.dp)
+                    .padding(horizontal = 12.dp, vertical = 2.dp)
             )
 
-            // Tabs
+            // ── 未斩 / 已斩 Tab ─────────────────────────────────
             TabRow(selectedTabIndex = selectedTab) {
-                Tab(
-                    selected = selectedTab == 0,
-                    onClick = { selectedTab = 0; searchQuery = "" },
-                    text = { Text("未斩（${unmastered.size}）") }
-                )
-                Tab(
-                    selected = selectedTab == 1,
-                    onClick = { selectedTab = 1; searchQuery = "" },
-                    text = { Text("已斩（${mastered.size}）") }
-                )
+                Tab(selected = selectedTab == 0, onClick = { selectedTab = 0; searchQuery = "" },
+                    text = { Text("未斩（${unmastered.size}）") })
+                Tab(selected = selectedTab == 1, onClick = { selectedTab = 1; searchQuery = "" },
+                    text = { Text("已斩（${mastered.size}）") })
             }
 
+            // ── 内容区 ──────────────────────────────────────────
             when (val state = loadState) {
                 is LoadState.Idle, is LoadState.Loading -> {
-                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
                             CircularProgressIndicator()
-                            Spacer(modifier = Modifier.height(12.dp))
-                            Text("正在读取百词斩数据库…")
+                            Spacer(Modifier.height(12.dp))
+                            Text("正在读取 ${selectedBook.displayName} 词书…")
                         }
                     }
                 }
-
                 is LoadState.Error -> {
-                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         Column(
                             horizontalAlignment = Alignment.CenterHorizontally,
                             modifier = Modifier.padding(24.dp)
                         ) {
-                            Text(
-                                "加载失败",
-                                style = MaterialTheme.typography.titleMedium,
-                                color = MaterialTheme.colorScheme.error
-                            )
-                            Spacer(modifier = Modifier.height(8.dp))
+                            Text("加载失败", style = MaterialTheme.typography.titleMedium,
+                                color = MaterialTheme.colorScheme.error)
+                            Spacer(Modifier.height(8.dp))
                             Text(state.message, style = MaterialTheme.typography.bodySmall)
-                            Spacer(modifier = Modifier.height(16.dp))
-                            Button(onClick = { scope.launch { repository.loadWords() } }) {
+                            Spacer(Modifier.height(16.dp))
+                            Button(onClick = { scope.launch { repository.loadWords(selectedBook) } }) {
                                 Text("重试")
                             }
                         }
                     }
                 }
-
                 is LoadState.Success -> {
                     if (displayList.isEmpty()) {
-                        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                             Text(if (searchQuery.isBlank()) "暂无单词" else "未找到匹配单词")
                         }
                     } else {
-                        LazyColumn(modifier = Modifier.fillMaxSize()) {
+                        LazyColumn(Modifier.fillMaxSize()) {
                             itemsIndexed(displayList) { _, word ->
-                                // Find the index in the full base list for FlashCard start position
                                 val indexInBase = baseList.indexOf(word)
                                 WordListItem(word = word, onClick = {
-                                    val intent = Intent(context, FlashCardActivity::class.java).apply {
-                                        putExtra(FlashCardActivity.EXTRA_FILTER, if (selectedTab == 0) "unmastered" else "mastered")
-                                        putExtra(FlashCardActivity.EXTRA_START_INDEX, indexInBase.coerceAtLeast(0))
-                                    }
-                                    context.startActivity(intent)
+                                    context.startActivity(
+                                        Intent(context, FlashCardActivity::class.java).apply {
+                                            putExtra(FlashCardActivity.EXTRA_FILTER,
+                                                if (selectedTab == 0) "unmastered" else "mastered")
+                                            putExtra(FlashCardActivity.EXTRA_START_INDEX,
+                                                indexInBase.coerceAtLeast(0))
+                                            putExtra(FlashCardActivity.EXTRA_BOOK_ID, selectedBook.id)
+                                        }
+                                    )
                                 })
                                 HorizontalDivider()
                             }

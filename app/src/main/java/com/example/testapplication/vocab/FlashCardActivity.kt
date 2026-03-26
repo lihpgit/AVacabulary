@@ -27,8 +27,9 @@ import java.util.Locale
 
 class FlashCardActivity : ComponentActivity() {
     companion object {
-        const val EXTRA_FILTER = "filter_type"
+        const val EXTRA_FILTER      = "filter_type"
         const val EXTRA_START_INDEX = "start_index"
+        const val EXTRA_BOOK_ID     = "book_id"
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -36,18 +37,19 @@ class FlashCardActivity : ComponentActivity() {
         enableEdgeToEdge()
         val filterType = intent.getStringExtra(EXTRA_FILTER) ?: "unmastered"
         val startIndex = intent.getIntExtra(EXTRA_START_INDEX, 0)
-        setContent { FlashCardScreen(filterType, startIndex) }
+        val bookId     = intent.getIntExtra(EXTRA_BOOK_ID, WordBook.GAOKAO.id)
+        setContent { FlashCardScreen(filterType, startIndex, bookId) }
     }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun FlashCardScreen(filterType: String, startIndex: Int) {
+fun FlashCardScreen(filterType: String, startIndex: Int, bookId: Int) {
     val context = LocalContext.current
     val repository = remember { WordRepository.getInstance(context) }
     val overrides by repository.overrides.collectAsState()
 
-    // Capture word list once at session start (frozen snapshot)
+    // 进入刷词时固定本次词单（不随后续 overrides 变化而改变顺序/数量）
     val words = remember {
         val state = repository.loadState.value
         if (state is LoadState.Success) {
