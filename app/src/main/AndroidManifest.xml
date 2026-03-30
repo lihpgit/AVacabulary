@@ -20,6 +20,7 @@
     </queries>
 
     <application
+        android:name=".App"
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
@@ -82,6 +83,7 @@
         <activity android:name=".NetworkSpeedActivity" android:exported="false" android:label="网络测速" />
         <activity android:name=".vocab.WordListActivity" android:exported="false" android:label="背单词" />
         <activity android:name=".vocab.FlashCardActivity" android:exported="false" android:label="刷词" android:screenOrientation="portrait" />
+        <activity android:name=".vocab.SyncActivity" android:exported="false" android:label="同步进度" />
     </application>
 
 </manifest>

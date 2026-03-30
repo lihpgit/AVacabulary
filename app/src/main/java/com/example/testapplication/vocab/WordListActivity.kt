@@ -5,10 +5,13 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Refresh
@@ -17,6 +20,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -26,7 +30,11 @@ class WordListActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        setContent { WordListScreen() }
+        setContent {
+            com.example.testapplication.ui.theme.TestApplicationTheme {
+                WordListScreen()
+            }
+        }
     }
 }
 
@@ -37,9 +45,10 @@ fun WordListScreen() {
     val scope = rememberCoroutineScope()
     val repository = remember { WordRepository.getInstance(context) }
 
-    val loadState  by repository.loadState.collectAsState()
-    val syncState  by repository.syncState.collectAsState()
-    val overrides  by repository.overrides.collectAsState()
+    val loadState    by repository.loadState.collectAsState()
+    val syncState    by repository.syncState.collectAsState()
+    val overrides    by repository.overrides.collectAsState()
+    val readTopicIds by repository.readTopicIds.collectAsState()
 
     var selectedBook by remember { mutableStateOf(WordBook.GAOKAO) }
     var selectedTab  by remember { mutableIntStateOf(0) }
@@ -112,6 +121,11 @@ fun WordListScreen() {
                     }
                 },
                 actions = {
+                    TextButton(onClick = {
+                        context.startActivity(Intent(context, SyncActivity::class.java))
+                    }) {
+                        Text("同步")
+                    }
                     if (syncState is SyncState.Syncing) {
                         CircularProgressIndicator(
                             modifier = Modifier
@@ -210,10 +224,21 @@ fun WordListScreen() {
                             Text(if (searchQuery.isBlank()) "暂无单词" else "未找到匹配单词")
                         }
                     } else {
-                        LazyColumn(Modifier.fillMaxSize()) {
+                        val listState = rememberLazyListState()
+                        // 有已读单词时，滚动到第一个未读单词
+                        LaunchedEffect(displayList, readTopicIds) {
+                            if (readTopicIds.isNotEmpty()) {
+                                val firstUnreadIndex = displayList.indexOfFirst { it.topicId !in readTopicIds }
+                                if (firstUnreadIndex > 0) {
+                                    listState.scrollToItem(firstUnreadIndex)
+                                }
+                            }
+                        }
+                        LazyColumn(Modifier.fillMaxSize(), state = listState) {
                             itemsIndexed(displayList) { _, word ->
                                 val indexInBase = baseList.indexOf(word)
-                                WordListItem(word = word, onClick = {
+                                val isRead = readTopicIds.contains(word.topicId)
+                                WordListItem(word = word, isRead = isRead, onClick = {
                                     context.startActivity(
                                         Intent(context, FlashCardActivity::class.java).apply {
                                             putExtra(FlashCardActivity.EXTRA_FILTER,
@@ -235,7 +260,7 @@ fun WordListScreen() {
 }
 
 @Composable
-private fun WordListItem(word: Word, onClick: () -> Unit) {
+private fun WordListItem(word: Word, isRead: Boolean, onClick: () -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -243,12 +268,24 @@ private fun WordListItem(word: Word, onClick: () -> Unit) {
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Text(
-            text = word.word,
-            fontWeight = FontWeight.SemiBold,
-            fontSize = 16.sp,
-            modifier = Modifier.width(140.dp)
-        )
+        Box(modifier = Modifier.width(148.dp)) {
+            if (isRead) {
+                Box(
+                    modifier = Modifier
+                        .size(8.dp)
+                        .background(
+                            color = Color(0xFF69F0AE),
+                            shape = RoundedCornerShape(2.dp)
+                        )
+                )
+            }
+            Text(
+                text = word.word,
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 16.sp,
+                modifier = Modifier.padding(start = if (isRead) 14.dp else 0.dp)
+            )
+        }
         Text(
             text = word.meanCn,
             style = MaterialTheme.typography.bodyMedium,

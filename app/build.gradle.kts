@@ -26,6 +26,7 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            signingConfig = signingConfigs.getByName("debug")
         }
     }
     compileOptions {
@@ -38,6 +39,10 @@ android {
     buildFeatures {
         compose = true
         aidl =true
+    }
+    androidResources {
+        // zpk 是百词斩资源包（内含 mp3），不需要 APK 再压缩
+        noCompress += "zpk"
     }
 }
 
@@ -65,6 +70,12 @@ dependencies {
     
     // Startup Profile Installer (Compose 启动优化)
     implementation("androidx.profileinstaller:profileinstaller:1.3.1")
+
+    // MMKV 高性能 KV 存储
+    implementation("com.tencent:mmkv:2.0.2")
+
+    // ZXing 二维码生成 + 扫描
+    implementation("com.journeyapps:zxing-android-embedded:4.3.0")
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)

@@ -224,7 +224,7 @@ fun AppItem(app: AppInfo, onClick: () -> Unit) {
         ) {
             if (app.packageName == XIANYU_PACKAGE) {
                 Image(
-                    painter = painterResource(id = R.drawable.xianyu_icon),
+                    painter = painterResource(id = R.drawable.ic_launcher_background),
                     contentDescription = app.label,
                     modifier = Modifier.fillMaxSize(),
                     contentScale = ContentScale.Crop
