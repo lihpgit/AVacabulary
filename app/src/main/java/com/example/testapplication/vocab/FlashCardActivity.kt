@@ -2,6 +2,7 @@ package com.example.testapplication.vocab
 
 import android.content.Context
 import android.content.Intent
+import com.tencent.mmkv.MMKV
 import android.media.MediaPlayer
 import android.media.PlaybackParams
 import android.os.Build
@@ -103,13 +104,22 @@ fun FlashCardScreen(filterType: String, startIndex: Int, bookId: Int) {
     val context = LocalContext.current
     val repository = remember { WordRepository.getInstance(context) }
     val overrides by repository.overrides.collectAsState()
-    val prefs = remember { context.getSharedPreferences("flashcard_prefs", Context.MODE_PRIVATE) }
+    val prefs = remember { MMKV.mmkvWithID("flashcard_prefs") }
     val scope = rememberCoroutineScope()
 
-    val words = remember {
-        val state = repository.loadState.value
-        if (state is LoadState.Success) {
-            val ov = repository.overrides.value
+    // 确保正确词书已加载（冷启动 / 词书与当前不符时触发）
+    LaunchedEffect(bookId) {
+        val book = WordBook.entries.firstOrNull { it.id == bookId } ?: WordBook.GAOKAO
+        if (repository.currentBook?.id != bookId) {
+            scope.launch { repository.loadWords(book) }
+        }
+    }
+
+    val loadStateVal by repository.loadState.collectAsState()
+    val words = remember(loadStateVal, overrides) {
+        val state = loadStateVal
+        if (state is LoadState.Success && repository.currentBook?.id == bookId) {
+            val ov = overrides
             when (filterType) {
                 "mastered" -> state.words.filter { repository.effectiveMastered(it.topicId, it.masteredInDb, ov) }
                 else       -> state.words.filter { !repository.effectiveMastered(it.topicId, it.masteredInDb, ov) }
@@ -128,27 +138,35 @@ fun FlashCardScreen(filterType: String, startIndex: Int, bookId: Int) {
     val pauseRepeatsState = remember { mutableIntStateOf(0) }   // 暂停期间额外朗读次数
     val pauseFinishedState = remember { mutableStateOf(false) } // 暂停的额外朗读已完成
 
-    // ── 持久化设置 ──
-    val autoReadState = remember { mutableStateOf(prefs.getBoolean("auto_read", false)) }
+    // ── 持久化设置（MMKV）──
+    val autoReadState = remember { mutableStateOf(prefs.decodeBool("auto_read", false)) }
     var autoRead by autoReadState
-    LaunchedEffect(autoRead) { prefs.edit().putBoolean("auto_read", autoRead).apply() }
+    LaunchedEffect(autoRead) { prefs.encode("auto_read", autoRead) }
 
-    var speechRate by remember { mutableFloatStateOf(prefs.getFloat("speech_rate", 1.0f)) }
-    LaunchedEffect(speechRate) { prefs.edit().putFloat("speech_rate", speechRate).apply() }
+    var speechRate by remember { mutableFloatStateOf(prefs.decodeFloat("speech_rate", 1.0f)) }
+    LaunchedEffect(speechRate) { prefs.encode("speech_rate", speechRate) }
 
-    val wordRepeatCountState = remember { mutableIntStateOf(prefs.getInt("word_repeat_count", 1)) }
+    val wordRepeatCountState = remember { mutableIntStateOf(prefs.decodeInt("word_repeat_count", 1)) }
     var wordRepeatCount by wordRepeatCountState
-    LaunchedEffect(wordRepeatCount) { prefs.edit().putInt("word_repeat_count", wordRepeatCount).apply() }
+    LaunchedEffect(wordRepeatCount) { prefs.encode("word_repeat_count", wordRepeatCount) }
 
-    val readSentenceState = remember { mutableStateOf(prefs.getBoolean("read_sentence", false)) }
+    val readSentenceState = remember { mutableStateOf(prefs.decodeBool("read_sentence", false)) }
     var readSentenceEnabled by readSentenceState
-    LaunchedEffect(readSentenceEnabled) { prefs.edit().putBoolean("read_sentence", readSentenceEnabled).apply() }
+    LaunchedEffect(readSentenceEnabled) { prefs.encode("read_sentence", readSentenceEnabled) }
 
-    val sentenceRepeatCountState = remember { mutableIntStateOf(prefs.getInt("sentence_repeat_count", 1)) }
+    val sentenceRepeatCountState = remember { mutableIntStateOf(prefs.decodeInt("sentence_repeat_count", 1)) }
     var sentenceRepeatCount by sentenceRepeatCountState
-    LaunchedEffect(sentenceRepeatCount) { prefs.edit().putInt("sentence_repeat_count", sentenceRepeatCount).apply() }
+    LaunchedEffect(sentenceRepeatCount) { prefs.encode("sentence_repeat_count", sentenceRepeatCount) }
     // 当前例句已朗读次数
     val currentSentenceRepeatState = remember { mutableIntStateOf(0) }
+    // 是否正在朗读例句（用于显示例句覆盖层）
+    val isSpeakingSentenceState = remember { mutableStateOf(false) }
+    // 例句朗读时是否显示大字覆盖层
+    val sentenceOverlayEnabledState = remember { mutableStateOf(prefs.decodeBool("sentence_overlay", true)) }
+    var sentenceOverlayEnabled by sentenceOverlayEnabledState
+    LaunchedEffect(sentenceOverlayEnabled) { prefs.encode("sentence_overlay", sentenceOverlayEnabled) }
+    var sentenceOverlayAlpha by remember { mutableFloatStateOf(prefs.decodeFloat("sentence_overlay_alpha", 0.465f)) }
+    LaunchedEffect(sentenceOverlayAlpha) { prefs.encode("sentence_overlay_alpha", sentenceOverlayAlpha) }
 
     // 当前词已朗读次数（切换单词时重置）
     val currentRepeatState = remember { mutableIntStateOf(0) }
@@ -159,14 +177,15 @@ fun FlashCardScreen(filterType: String, startIndex: Int, bookId: Int) {
     // 从持久化的已读标记恢复
     val readTopicIds by repository.readTopicIds.collectAsState()
 
-    val showTransWhileReadState = remember { mutableStateOf(prefs.getBoolean("show_trans_while_read", false)) }
+    val showTransWhileReadState = remember { mutableStateOf(prefs.decodeBool("show_trans_while_read", false)) }
     var showTransWhileRead by showTransWhileReadState
-    LaunchedEffect(showTransWhileRead) { prefs.edit().putBoolean("show_trans_while_read", showTransWhileRead).apply() }
+    LaunchedEffect(showTransWhileRead) { prefs.encode("show_trans_while_read", showTransWhileRead) }
 
     var showRepeatDialog by remember { mutableStateOf(false) }
     var showSpeedDialog by remember { mutableStateOf(false) }
     var showTransModeDialog by remember { mutableStateOf(false) }
     var showTtsHelpDialog by remember { mutableStateOf(false) }
+    var showRoundCompleteDialog by remember { mutableStateOf(false) }
 
     // 累积计时（秒）
     var elapsedSeconds by remember { mutableIntStateOf(0) }
@@ -319,9 +338,11 @@ fun FlashCardScreen(filterType: String, startIndex: Int, bookId: Int) {
                     val sBytes = if (!sKey.isNullOrBlank()) zpkFiles?.get(sKey) else null
                     if (sBytes != null) {
                         currentSentenceRepeatState.intValue = 0
+                        isSpeakingSentenceState.value = true
                         fun playSentenceLoop() {
                             playBytes(sBytes) {
                                 if (isPausedState.value) {
+                                    isSpeakingSentenceState.value = false
                                     pauseFinishedState.value = true
                                     return@playBytes
                                 }
@@ -329,6 +350,7 @@ fun FlashCardScreen(filterType: String, startIndex: Int, bookId: Int) {
                                 if (currentSentenceRepeatState.intValue < sentenceRepeatCountState.intValue) {
                                     playSentenceLoop()
                                 } else {
+                                    isSpeakingSentenceState.value = false
                                     advanceToNext(wordIdx)
                                 }
                             }
@@ -356,10 +378,13 @@ fun FlashCardScreen(filterType: String, startIndex: Int, bookId: Int) {
 
     val currentWord = words.getOrNull(currentIndex)
 
-    LaunchedEffect(currentIndex) {
+    // words.isEmpty() 作为 key：冷启动词书加载完成后重跑，避免第一个词漏掉 markRead
+    LaunchedEffect(currentIndex, words.isEmpty()) {
+        if (words.isEmpty()) return@LaunchedEffect
         if (!isPaused) showTranslation = showTransWhileRead
         currentRepeat = 0
         currentSentenceRepeatState.intValue = 0
+        isSpeakingSentenceState.value = false
         pauseRepeatsState.intValue = 0
         pauseFinishedState.value = false
         // 标记当前词为已读
@@ -371,6 +396,8 @@ fun FlashCardScreen(filterType: String, startIndex: Int, bookId: Int) {
             if (allTopicIds.all { it in updatedReadIds }) {
                 roundCount++
                 repository.clearReadMarks()
+                isPaused = true
+                showRoundCompleteDialog = true
             }
         }
         val word = words.getOrNull(currentIndex) ?: return@LaunchedEffect
@@ -391,6 +418,27 @@ fun FlashCardScreen(filterType: String, startIndex: Int, bookId: Int) {
             && zpkFiles?.containsKey(zpkMeta?.sentenceAudio) == true
 
     // ── 对话框 ──
+
+    if (showRoundCompleteDialog) {
+        AlertDialog(
+            onDismissRequest = { /* 不允许点外部关闭，必须主动选择 */ },
+            title = { Text("第 $roundCount 轮完成 🎉") },
+            text = { Text("已读完全部 ${words.size} 个单词！\n是否开始第 ${roundCount + 1} 轮？") },
+            confirmButton = {
+                TextButton(onClick = {
+                    showRoundCompleteDialog = false
+                    currentIndex = 0
+                    isPaused = false
+                }) { Text("开始第 ${roundCount + 1} 轮") }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    showRoundCompleteDialog = false
+                    (context as? androidx.activity.ComponentActivity)?.finish()
+                }) { Text("结束学习") }
+            }
+        )
+    }
 
     if (showTtsHelpDialog) {
         AlertDialog(
@@ -470,6 +518,33 @@ fun FlashCardScreen(filterType: String, startIndex: Int, bookId: Int) {
                                     Text("${n}遍", fontSize = 14.sp)
                                 }
                             }
+                        }
+                        Spacer(Modifier.height(8.dp))
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("覆盖层背景透明度", fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
+                            Text("${(sentenceOverlayAlpha * 100).toInt()}%",
+                                fontSize = 13.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        Slider(
+                            value = sentenceOverlayAlpha,
+                            onValueChange = { sentenceOverlayAlpha = it },
+                            valueRange = 0f..1f,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        Spacer(Modifier.height(4.dp))
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { sentenceOverlayEnabled = !sentenceOverlayEnabled }
+                        ) {
+                            Checkbox(checked = sentenceOverlayEnabled, onCheckedChange = { sentenceOverlayEnabled = it })
+                            Spacer(Modifier.width(4.dp))
+                            Text("例句朗读时显示大字覆盖层")
                         }
                     }
                 }
@@ -749,6 +824,7 @@ fun FlashCardScreen(filterType: String, startIndex: Int, bookId: Int) {
                             }
 
                             // 例句（英文，始终显示）
+                            val isSpeakingSentence = isSpeakingSentenceState.value
                             if (displaySentence.isNotBlank()) {
                                 Spacer(Modifier.height(16.dp))
                                 HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
@@ -869,6 +945,44 @@ fun FlashCardScreen(filterType: String, startIndex: Int, bookId: Int) {
                 }
 
                 Spacer(Modifier.height(10.dp))
+            }
+
+            // ── 例句朗读覆盖层（无 pointer input，点击透传到卡片）──
+            // 平板判断：最小边 >= 600dp
+            val isTablet = with(density) { minOf(maxW, maxH).toDp() >= 600.dp }
+            val sentenceFontSize = if (isTablet) 85.sp else 50.sp
+            val sentenceLineHeight = if (isTablet) 98.sp else 60.sp
+            if (isSpeakingSentenceState.value && sentenceOverlayEnabled && displaySentence.isNotBlank()) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .fillMaxWidth()
+                        .background(
+                            color = MaterialTheme.colorScheme.surface.copy(alpha = sentenceOverlayAlpha),
+                            shape = androidx.compose.foundation.shape.RoundedCornerShape(16.dp)
+                        )
+                        .padding(horizontal = 8.dp, vertical = 16.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(
+                            text = displaySentence,
+                            fontSize = sentenceFontSize,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            textAlign = TextAlign.Center,
+                            lineHeight = sentenceLineHeight
+                        )
+                        if (showTranslation && displaySentenceTrans.isNotBlank()) {
+                            Spacer(Modifier.height(10.dp))
+                            Text(
+                                text = displaySentenceTrans,
+                                fontSize = 18.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                textAlign = TextAlign.Center
+                            )
+                        }
+                    }
+                }
             }
 
             // ── 悬浮可拖动朗读按钮 ──

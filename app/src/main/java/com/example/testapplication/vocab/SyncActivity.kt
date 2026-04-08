@@ -1,6 +1,8 @@
 package com.example.testapplication.vocab
 
+import android.content.Context
 import android.graphics.Bitmap
+import android.net.ConnectivityManager
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -131,7 +133,7 @@ private fun SyncScreen() {
                     Button(
                         onClick = {
                             scope.launch {
-                                startSending(repository, serverSocketRef) { newState ->
+                                startSending(context, repository, serverSocketRef) { newState ->
                                     state = newState
                                 }
                             }
@@ -227,12 +229,13 @@ private fun SyncScreen() {
 // ── 发送端逻辑 ─────────────────────────────────────────────────
 
 private suspend fun startSending(
+    context: Context,
     repository: WordRepository,
     serverSocketRef: MutableState<ServerSocket?>,
     onState: (SyncUiState) -> Unit
 ) {
     withContext(Dispatchers.IO) {
-        val ip = getLocalIp()
+        val ip = getLocalIp(context)
         if (ip == null) {
             withContext(Dispatchers.Main) {
                 onState(SyncUiState.Done("无法获取本机 IP，请检查 WiFi 连接", isError = true))
@@ -357,11 +360,24 @@ private suspend fun receiveProgress(
 
 // ── 工具方法 ───────────────────────────────────────────────────
 
-private fun getLocalIp(): String? {
+private fun getLocalIp(context: Context): String? {
+    // 优先用 ConnectivityManager 获取当前活跃网络的 IP，避免 VPN/USB 网络干扰
+    try {
+        val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+        val lp = cm?.getLinkProperties(cm.activeNetwork ?: return@getLocalIp null)
+        lp?.linkAddresses?.forEach { la ->
+            val addr = la.address
+            if (addr is Inet4Address && !addr.isLoopbackAddress) {
+                return addr.hostAddress
+            }
+        }
+    } catch (_: Exception) {}
+    // 兜底：遍历网络接口
     try {
         NetworkInterface.getNetworkInterfaces()?.toList()?.forEach { intf ->
+            if (!intf.isUp || intf.isLoopback) return@forEach
             intf.inetAddresses?.toList()?.forEach { addr ->
-                if (!addr.isLoopbackAddress && addr is Inet4Address) {
+                if (addr is Inet4Address && !addr.isLoopbackAddress) {
                     return addr.hostAddress
                 }
             }
@@ -369,6 +385,7 @@ private fun getLocalIp(): String? {
     } catch (_: Exception) {}
     return null
 }
+
 
 private fun generateQR(content: String, size: Int): Bitmap {
     val writer = QRCodeWriter()

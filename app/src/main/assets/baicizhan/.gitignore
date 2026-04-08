@@ -1,11 +1,13 @@
-# 百词斩数据库文件较大，不纳入版本控制
-# 部署时手动将以下文件放入此目录：
-#   lookup.db
-#   baicizhantopicproblem.db
-#   roadmap/road_map_*.baicizhan
-*
-!.gitignore
-!README.txt
-!roadmap/
-roadmap/*
-!roadmap/.gitkeep
+# zpk 音频资源包（3GB+，不纳入版本控制）
+zpack/
+
+# SQLite 日志文件（临时文件）
+*.db-journal
+*.db-wal
+*.db-shm
+
+# 百词斩运行时缓存目录
+KVHelperLarge/
+OwnAdImg/
+loading/
+res/

@@ -235,10 +235,10 @@ fun WordListScreen() {
                             }
                         }
                         LazyColumn(Modifier.fillMaxSize(), state = listState) {
-                            itemsIndexed(displayList) { _, word ->
+                            itemsIndexed(displayList) { idx, word ->
                                 val indexInBase = baseList.indexOf(word)
                                 val isRead = readTopicIds.contains(word.topicId)
-                                WordListItem(word = word, isRead = isRead, onClick = {
+                                WordListItem(word = word, index = idx + 1, isRead = isRead, onClick = {
                                     context.startActivity(
                                         Intent(context, FlashCardActivity::class.java).apply {
                                             putExtra(FlashCardActivity.EXTRA_FILTER,
@@ -260,7 +260,7 @@ fun WordListScreen() {
 }
 
 @Composable
-private fun WordListItem(word: Word, isRead: Boolean, onClick: () -> Unit) {
+private fun WordListItem(word: Word, index: Int, isRead: Boolean, onClick: () -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -286,12 +286,20 @@ private fun WordListItem(word: Word, isRead: Boolean, onClick: () -> Unit) {
                 modifier = Modifier.padding(start = if (isRead) 14.dp else 0.dp)
             )
         }
-        Text(
-            text = word.meanCn,
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.weight(1f),
-            maxLines = 2
-        )
+        Box(modifier = Modifier.weight(1f)) {
+            Text(
+                text = word.meanCn,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.fillMaxWidth().padding(end = 28.dp),
+                maxLines = 2
+            )
+            Text(
+                text = "$index",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f),
+                modifier = Modifier.align(Alignment.TopEnd)
+            )
+        }
     }
 }

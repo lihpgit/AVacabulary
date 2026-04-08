@@ -28,9 +28,11 @@ sealed class SyncState {
 class WordRepository private constructor(private val appContext: Context) {
 
     companion object {
-        private const val PREFS_NAME = "word_overrides"
+        private const val PREFS_NAME = "word_overrides"     // MMKV ID
+        private const val KEY_OVERRIDES = "overrides_json"  // MMKV key，存 JSON 字符串
         private const val READ_MARKS_PREFS = "read_marks"
-        private const val KEY_READ_IDS = "read_topic_ids"
+        // 已读标记按词书隔离：key = "read_topic_ids_{bookId}"
+        private fun readMarksKey(book: WordBook) = "read_topic_ids_${book.id}"
 
         @Volatile
         private var INSTANCE: WordRepository? = null
@@ -55,21 +57,42 @@ class WordRepository private constructor(private val appContext: Context) {
     private val _overrides = MutableStateFlow<Map<Int, Boolean>>(emptyMap())
     val overrides: StateFlow<Map<Int, Boolean>> = _overrides
 
-    // 已读单词 topicId 集合（用于列表页绿色标记，轮次刷新时清空）
+    // 已读单词 topicId 集合（用于列表页绿色标记，轮次刷新时清空）按词书隔离
     // 使用 MMKV 存储，mmap 机制保证写入即持久化，不怕进程被杀
     private val mmkv = MMKV.mmkvWithID(READ_MARKS_PREFS)
-    private val _readTopicIds = MutableStateFlow<Set<Int>>(loadReadMarks())
+    // 已斩/未斩 override 存储（MMKV，整个 Map 序列化为 JSON 字符串）
+    private val mmkvOverrides = MMKV.mmkvWithID(PREFS_NAME)
+
+    // 当前加载的词书（null = 尚未加载）
+    private var _currentBook: WordBook? = null
+    val currentBook: WordBook? get() = _currentBook
+
+    // 仅保存当前词书的已读标记，切换词书时替换
+    private val _readTopicIds = MutableStateFlow<Set<Int>>(emptySet())
     val readTopicIds: StateFlow<Set<Int>> = _readTopicIds
 
-    private fun loadReadMarks(): Set<Int> {
-        val stored = mmkv.decodeString(KEY_READ_IDS)
-        if (stored.isNullOrBlank()) return emptySet()
-        return stored.split(",").mapNotNull { it.toIntOrNull() }.toSet()
+    private fun loadReadMarks(book: WordBook): Set<Int> {
+        val key = readMarksKey(book)
+        val stored = mmkv.decodeString(key)
+        if (!stored.isNullOrBlank()) {
+            return stored.split(",").mapNotNull { it.toIntOrNull() }.toSet()
+        }
+        // 一次性迁移：旧数据存在全局 key "read_topic_ids" 下，归属高考
+        if (book == WordBook.GAOKAO) {
+            val legacy = mmkv.decodeString("read_topic_ids")
+            if (!legacy.isNullOrBlank()) {
+                mmkv.encode(key, legacy)          // 写入新 key
+                mmkv.removeValueForKey("read_topic_ids")  // 删除旧 key
+                return legacy.split(",").mapNotNull { it.toIntOrNull() }.toSet()
+            }
+        }
+        return emptySet()
     }
 
     private fun saveReadMarks(ids: Set<Int>) {
+        val book = _currentBook ?: return
         val value = if (ids.isEmpty()) "" else ids.joinToString(",")
-        mmkv.encode(KEY_READ_IDS, value)
+        mmkv.encode(readMarksKey(book), value)
     }
 
     fun markRead(topicId: Int) {
@@ -79,23 +102,35 @@ class WordRepository private constructor(private val appContext: Context) {
     }
 
     fun clearReadMarks() {
+        val book = _currentBook ?: return
         _readTopicIds.value = emptySet()
-        mmkv.encode(KEY_READ_IDS, "")
+        mmkv.encode(readMarksKey(book), "")
     }
 
     private val wordCache = mutableMapOf<WordBook, List<Word>>()
 
     init {
-        val prefs = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        @Suppress("UNCHECKED_CAST")
-        _overrides.value = prefs.all.entries.mapNotNull { (k, v) ->
-            k.toIntOrNull()?.let { id -> id to (v as Boolean) }
-        }.toMap()
+        // 从 MMKV 加载已斩/未斩 override（JSON 字符串 → Map）
+        val stored = mmkvOverrides.decodeString(KEY_OVERRIDES)
+        if (!stored.isNullOrBlank()) {
+            try {
+                val jsonObj = JSONObject(stored)
+                val map = mutableMapOf<Int, Boolean>()
+                val keys = jsonObj.keys()
+                while (keys.hasNext()) {
+                    val key = keys.next()
+                    key.toIntOrNull()?.let { id -> map[id] = jsonObj.getBoolean(key) }
+                }
+                _overrides.value = map
+            } catch (_: Exception) {}
+        }
     }
 
     /** 加载指定词书。forceReload=true 时清除缓存重新读 DB */
     suspend fun loadWords(book: WordBook, forceReload: Boolean = false) {
         if (!forceReload && wordCache.containsKey(book)) {
+            _currentBook = book
+            _readTopicIds.value = loadReadMarks(book)
             _loadState.value = LoadState.Success(wordCache[book]!!)
             return
         }
@@ -131,6 +166,8 @@ class WordRepository private constructor(private val appContext: Context) {
                 }.sortedBy { it.word.lowercase() }
 
                 wordCache[book] = words
+                _currentBook = book
+                _readTopicIds.value = loadReadMarks(book)
                 _loadState.value = LoadState.Success(words)
             } catch (e: Exception) {
                 _loadState.value = LoadState.Error(e.message ?: "加载失败")
@@ -370,25 +407,34 @@ class WordRepository private constructor(private val appContext: Context) {
     fun effectiveMastered(topicId: Int, dbState: Boolean, overrides: Map<Int, Boolean>): Boolean =
         overrides.getOrDefault(topicId, dbState)
 
+    private fun saveOverrides(map: Map<Int, Boolean>) {
+        val jsonObj = JSONObject()
+        map.forEach { (k, v) -> jsonObj.put(k.toString(), v) }
+        mmkvOverrides.encode(KEY_OVERRIDES, jsonObj.toString())
+    }
+
     fun toggleMastered(topicId: Int, currentEffective: Boolean) {
         val new = !currentEffective
-        _overrides.value = _overrides.value.toMutableMap().also { it[topicId] = new }
-        appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .edit().putBoolean(topicId.toString(), new).apply()
+        val updated = _overrides.value.toMutableMap().also { it[topicId] = new }
+        _overrides.value = updated
+        saveOverrides(updated)
     }
 
     // ── 进度同步：导出/导入 ─────────────────────────────────────────
 
     fun exportProgress(): String {
         val json = JSONObject()
-        // 已斩/未斩
+        // 已斩/未斩（全局，topicId 跨词书唯一）
         val ov = JSONObject()
         _overrides.value.forEach { (k, v) -> ov.put(k.toString(), v) }
         json.put("overrides", ov)
-        // 已读标记
-        val readArray = JSONArray()
-        _readTopicIds.value.forEach { readArray.put(it) }
-        json.put("readTopicIds", readArray)
+        // 已读标记：按词书分别导出，key = "readTopicIds_{bookId}"
+        for (book in WordBook.entries) {
+            val ids = if (book == _currentBook) _readTopicIds.value else loadReadMarks(book)
+            val arr = JSONArray()
+            ids.forEach { arr.put(it) }
+            json.put("readTopicIds_${book.id}", arr)
+        }
         return json.toString()
     }
 
@@ -404,18 +450,16 @@ class WordRepository private constructor(private val appContext: Context) {
                 key.toIntOrNull()?.let { id -> map[id] = ov.getBoolean(key) }
             }
             _overrides.value = map
-            val prefs = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            val editor = prefs.edit().clear()
-            map.forEach { (k, v) -> editor.putBoolean(k.toString(), v) }
-            editor.commit()
+            saveOverrides(map)
         }
-        // 覆盖已读标记
-        val readArray = json.optJSONArray("readTopicIds")
-        if (readArray != null) {
+        // 覆盖各词书的已读标记
+        for (book in WordBook.entries) {
+            val arr = json.optJSONArray("readTopicIds_${book.id}") ?: continue
             val ids = mutableSetOf<Int>()
-            for (i in 0 until readArray.length()) ids.add(readArray.getInt(i))
-            _readTopicIds.value = ids
-            saveReadMarks(ids)
+            for (i in 0 until arr.length()) ids.add(arr.getInt(i))
+            val value = if (ids.isEmpty()) "" else ids.joinToString(",")
+            mmkv.encode(readMarksKey(book), value)
+            if (book == _currentBook) _readTopicIds.value = ids
         }
         // 清除词缓存，下次打开列表时重新加载
         wordCache.clear()
