@@ -45,10 +45,11 @@ fun WordListScreen() {
     val scope = rememberCoroutineScope()
     val repository = remember { WordRepository.getInstance(context) }
 
-    val loadState    by repository.loadState.collectAsState()
-    val syncState    by repository.syncState.collectAsState()
-    val overrides    by repository.overrides.collectAsState()
-    val readTopicIds by repository.readTopicIds.collectAsState()
+    val loadState       by repository.loadState.collectAsState()
+    val syncState       by repository.syncState.collectAsState()
+    val overrides       by repository.overrides.collectAsState()
+    val readTopicIds    by repository.readTopicIds.collectAsState()
+    val crossBookCounts by repository.crossBookCounts.collectAsState()
 
     var selectedBook by remember { mutableStateOf(WordBook.GAOKAO) }
     var selectedTab  by remember { mutableIntStateOf(0) }
@@ -238,7 +239,10 @@ fun WordListScreen() {
                             itemsIndexed(displayList) { idx, word ->
                                 val indexInBase = baseList.indexOf(word)
                                 val isRead = readTopicIds.contains(word.topicId)
-                                WordListItem(word = word, index = idx + 1, isRead = isRead, onClick = {
+                                val crossBookCount = if (selectedTab == 0)
+                                    crossBookCounts[word.topicId] ?: 1 else 1
+                                WordListItem(word = word, index = idx + 1, isRead = isRead,
+                                    crossBookCount = crossBookCount, onClick = {
                                     context.startActivity(
                                         Intent(context, FlashCardActivity::class.java).apply {
                                             putExtra(FlashCardActivity.EXTRA_FILTER,
@@ -260,7 +264,12 @@ fun WordListScreen() {
 }
 
 @Composable
-private fun WordListItem(word: Word, index: Int, isRead: Boolean, onClick: () -> Unit) {
+private fun WordListItem(word: Word, index: Int, isRead: Boolean, crossBookCount: Int = 1, onClick: () -> Unit) {
+    val wordColor = when {
+        crossBookCount >= 3 -> Color(0xFFFF9800) // 出现在另外两本词书 → 橙色
+        crossBookCount == 2 -> Color(0xFF4CAF50) // 出现在另外一本词书 → 绿色
+        else -> Color.Unspecified               // 仅当前词书 → 默认白色
+    }
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -283,6 +292,7 @@ private fun WordListItem(word: Word, index: Int, isRead: Boolean, onClick: () ->
                 text = word.word,
                 fontWeight = FontWeight.SemiBold,
                 fontSize = 16.sp,
+                color = wordColor,
                 modifier = Modifier.padding(start = if (isRead) 14.dp else 0.dp)
             )
         }

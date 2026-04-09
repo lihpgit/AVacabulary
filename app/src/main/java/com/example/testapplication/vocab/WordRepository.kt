@@ -71,6 +71,23 @@ class WordRepository private constructor(private val appContext: Context) {
     private val _readTopicIds = MutableStateFlow<Set<Int>>(emptySet())
     val readTopicIds: StateFlow<Set<Int>> = _readTopicIds
 
+    // topicId 在所有词书中出现的次数（1=仅当前词书，2=另有1本，3=另有2本）
+    private val _crossBookCounts = MutableStateFlow<Map<Int, Int>>(emptyMap())
+    val crossBookCounts: StateFlow<Map<Int, Int>> = _crossBookCounts
+
+    private fun refreshCrossBookCounts() {
+        val counts = mutableMapOf<Int, Int>()
+        for (book in WordBook.entries) {
+            val file = roadmapFile(book)
+            if (!file.exists()) continue
+            try {
+                val ids = parseRoadmap(file)
+                for (id in ids) counts[id] = (counts[id] ?: 0) + 1
+            } catch (_: Exception) {}
+        }
+        _crossBookCounts.value = counts
+    }
+
     private fun loadReadMarks(book: WordBook): Set<Int> {
         val key = readMarksKey(book)
         val stored = mmkv.decodeString(key)
@@ -140,6 +157,7 @@ class WordRepository private constructor(private val appContext: Context) {
         withContext(Dispatchers.IO) {
             try {
                 ensureAssetsExtracted()
+                if (_crossBookCounts.value.isEmpty()) refreshCrossBookCounts()
 
                 val roadmap = roadmapFile(book)
                 if (!roadmap.exists())
@@ -199,6 +217,7 @@ class WordRepository private constructor(private val appContext: Context) {
                     throw Exception("assets/baicizhan/lookup.db 不存在或为空，请先将数据库文件放入 assets 目录")
 
                 wordCache.clear()
+                _crossBookCounts.value = emptyMap() // 强制下次 loadWords 重新统计
                 _syncState.value = SyncState.Success
             } catch (e: Exception) {
                 _syncState.value = SyncState.Error(e.message ?: "同步失败")

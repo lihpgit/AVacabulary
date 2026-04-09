@@ -22,6 +22,7 @@ import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -103,7 +104,8 @@ private fun parseZpkMeta(files: Map<String, ByteArray>): ZpkMeta? {
 fun FlashCardScreen(filterType: String, startIndex: Int, bookId: Int) {
     val context = LocalContext.current
     val repository = remember { WordRepository.getInstance(context) }
-    val overrides by repository.overrides.collectAsState()
+    val overrides       by repository.overrides.collectAsState()
+    val crossBookCounts by repository.crossBookCounts.collectAsState()
     val prefs = remember { MMKV.mmkvWithID("flashcard_prefs") }
     val scope = rememberCoroutineScope()
 
@@ -671,11 +673,21 @@ fun FlashCardScreen(filterType: String, startIndex: Int, bookId: Int) {
 
         val word = currentWord!!
         val effectiveMastered = repository.effectiveMastered(word.topicId, word.masteredInDb, overrides)
+        val wordDisplayColor = if (filterType == "unmastered") {
+            when (crossBookCounts[word.topicId] ?: 1) {
+                3    -> Color(0xFFFF9800) // 出现在另外两本词书 → 橙色
+                2    -> Color(0xFF4CAF50) // 出现在另外一本词书 → 绿色
+                else -> Color.Unspecified
+            }
+        } else Color.Unspecified
         val density = LocalDensity.current
 
         BoxWithConstraints(modifier = Modifier.padding(padding).fillMaxSize()) {
-            val maxW = constraints.maxWidth.toFloat()
-            val maxH = constraints.maxHeight.toFloat()
+            // 使用 scope 的 Dp 属性（满足 BoxWithConstraintsUnusedScope lint 要求）
+            val maxWDp = maxWidth
+            val maxHDp = maxHeight
+            val maxW = with(density) { maxWDp.toPx() }
+            val maxH = with(density) { maxHDp.toPx() }
             val btnPx = with(density) { 56.dp.toPx() }
 
             var floatX by remember { mutableFloatStateOf(maxW - btnPx - with(density) { 16.dp.toPx() }) }
@@ -774,7 +786,18 @@ fun FlashCardScreen(filterType: String, startIndex: Int, bookId: Int) {
                         }
                     }
 
-                    Column(modifier = Modifier.fillMaxSize()) {
+                    Box(modifier = Modifier.fillMaxSize()) {
+                        // 已斩水印
+                        if (effectiveMastered) {
+                            Text(
+                                text = "斩",
+                                fontSize = 180.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.error.copy(alpha = 0.07f),
+                                modifier = Modifier.align(Alignment.Center)
+                            )
+                        }
+                        Column(modifier = Modifier.fillMaxSize()) {
                         // 上部：可滚动的主内容
                         Column(
                             modifier = Modifier
@@ -786,7 +809,7 @@ fun FlashCardScreen(filterType: String, startIndex: Int, bookId: Int) {
                             horizontalAlignment = Alignment.CenterHorizontally
                         ) {
                             // 单词
-                            AdaptiveWordText(word = word.word)
+                            AdaptiveWordText(word = word.word, color = wordDisplayColor)
 
                             // [暂停] 中文释义（在单词下方）
                             if (showTranslation && displayMeanCn.isNotBlank()) {
@@ -899,6 +922,7 @@ fun FlashCardScreen(filterType: String, startIndex: Int, bookId: Int) {
                         }
                     }
                 }
+                } // Card
 
                 Spacer(Modifier.height(6.dp))
 
@@ -945,11 +969,11 @@ fun FlashCardScreen(filterType: String, startIndex: Int, bookId: Int) {
                 }
 
                 Spacer(Modifier.height(10.dp))
-            }
+            } // Column(fillMaxSize)
 
             // ── 例句朗读覆盖层（无 pointer input，点击透传到卡片）──
             // 平板判断：最小边 >= 600dp
-            val isTablet = with(density) { minOf(maxW, maxH).toDp() >= 600.dp }
+            val isTablet = minOf(maxWDp, maxHDp) >= 600.dp
             val sentenceFontSize = if (isTablet) 85.sp else 50.sp
             val sentenceLineHeight = if (isTablet) 98.sp else 60.sp
             if (isSpeakingSentenceState.value && sentenceOverlayEnabled && displaySentence.isNotBlank()) {
@@ -1010,9 +1034,10 @@ fun FlashCardScreen(filterType: String, startIndex: Int, bookId: Int) {
 // ── 自适应字号 ───────────────────────────────────────────────────
 
 @Composable
-private fun AdaptiveWordText(word: String) {
+private fun AdaptiveWordText(word: String, color: Color = Color.Unspecified) {
     var fontSize by remember(word) { mutableStateOf(200f) }
     var measured  by remember(word) { mutableStateOf(false) }
+    val resolvedColor = if (color == Color.Unspecified) MaterialTheme.colorScheme.onBackground else color
     Text(
         text = word,
         fontSize = TextUnit(fontSize, TextUnitType.Sp),
@@ -1021,7 +1046,7 @@ private fun AdaptiveWordText(word: String) {
         textAlign = TextAlign.Center,
         maxLines = 1,
         overflow = TextOverflow.Clip,
-        color = MaterialTheme.colorScheme.onBackground,
+        color = resolvedColor,
         modifier = Modifier.fillMaxWidth().alpha(if (measured) 1f else 0f),
         onTextLayout = { result ->
             if (result.hasVisualOverflow && fontSize > 12f) fontSize *= 0.85f
