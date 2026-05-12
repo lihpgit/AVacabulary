@@ -31,8 +31,15 @@ class WordRepository private constructor(private val appContext: Context) {
         private const val PREFS_NAME = "word_overrides"     // MMKV ID
         private const val KEY_OVERRIDES = "overrides_json"  // MMKV key，存 JSON 字符串
         private const val READ_MARKS_PREFS = "read_marks"
-        // 已读标记按词书隔离：key = "read_topic_ids_{bookId}"
-        private fun readMarksKey(book: WordBook) = "read_topic_ids_${book.id}"
+
+        const val FILTER_UNMASTERED = "unmastered"
+        const val FILTER_MASTERED   = "mastered"
+
+        // 已读标记按词书 + 过滤类型隔离：key = "read_topic_ids_{bookId}_{filterType}"
+        private fun readMarksKey(book: WordBook, filterType: String) =
+            "read_topic_ids_${book.id}_$filterType"
+        // 旧版 key（只按词书隔离），仅用于一次性清理
+        private fun legacyReadMarksKey(book: WordBook) = "read_topic_ids_${book.id}"
 
         @Volatile
         private var INSTANCE: WordRepository? = null
@@ -67,61 +74,105 @@ class WordRepository private constructor(private val appContext: Context) {
     private var _currentBook: WordBook? = null
     val currentBook: WordBook? get() = _currentBook
 
-    // 仅保存当前词书的已读标记，切换词书时替换
-    private val _readTopicIds = MutableStateFlow<Set<Int>>(emptySet())
-    val readTopicIds: StateFlow<Set<Int>> = _readTopicIds
+    // 当前词书的已读标记，按 未斩/已斩 分桶，切换词书时替换
+    private val _readTopicIdsUnmastered = MutableStateFlow<Set<Int>>(emptySet())
+    val readTopicIdsUnmastered: StateFlow<Set<Int>> = _readTopicIdsUnmastered
+
+    private val _readTopicIdsMastered = MutableStateFlow<Set<Int>>(emptySet())
+    val readTopicIdsMastered: StateFlow<Set<Int>> = _readTopicIdsMastered
+
+    /** 按 filterType 取对应桶的已读标记 StateFlow */
+    fun readTopicIds(filterType: String): StateFlow<Set<Int>> =
+        if (filterType == FILTER_MASTERED) _readTopicIdsMastered else _readTopicIdsUnmastered
 
     // topicId 在所有词书中出现的次数（1=仅当前词书，2=另有1本，3=另有2本）
     private val _crossBookCounts = MutableStateFlow<Map<Int, Int>>(emptyMap())
     val crossBookCounts: StateFlow<Map<Int, Int>> = _crossBookCounts
 
+    // 各词书的 topicId 集合（用于跨词书过滤）
+    private val _bookTopicIds = MutableStateFlow<Map<WordBook, Set<Int>>>(emptyMap())
+    val bookTopicIds: StateFlow<Map<WordBook, Set<Int>>> = _bookTopicIds
+
+    // 全词书去重后的 (未斩数, 已斩数)
+    private val _globalFilteredCounts = MutableStateFlow<Pair<Int, Int>?>(null)
+    val globalFilteredCounts: StateFlow<Pair<Int, Int>?> = _globalFilteredCounts
+
     private fun refreshCrossBookCounts() {
         val counts = mutableMapOf<Int, Int>()
+        val byBook = mutableMapOf<WordBook, Set<Int>>()
         for (book in WordBook.entries) {
             val file = roadmapFile(book)
             if (!file.exists()) continue
             try {
                 val ids = parseRoadmap(file)
+                byBook[book] = ids.toSet()
                 for (id in ids) counts[id] = (counts[id] ?: 0) + 1
             } catch (_: Exception) {}
         }
         _crossBookCounts.value = counts
+        _bookTopicIds.value = byBook
     }
 
-    private fun loadReadMarks(book: WordBook): Set<Int> {
-        val key = readMarksKey(book)
-        val stored = mmkv.decodeString(key)
-        if (!stored.isNullOrBlank()) {
-            return stored.split(",").mapNotNull { it.toIntOrNull() }.toSet()
-        }
-        // 一次性迁移：旧数据存在全局 key "read_topic_ids" 下，归属高考
-        if (book == WordBook.GAOKAO) {
-            val legacy = mmkv.decodeString("read_topic_ids")
-            if (!legacy.isNullOrBlank()) {
-                mmkv.encode(key, legacy)          // 写入新 key
-                mmkv.removeValueForKey("read_topic_ids")  // 删除旧 key
-                return legacy.split(",").mapNotNull { it.toIntOrNull() }.toSet()
+    /** 从 DB 读取全部词书的掌握状态，去重后统计未斩/已斩总数 */
+    suspend fun refreshGlobalFilteredCounts() {
+        withContext(Dispatchers.IO) {
+            ensureAssetsExtracted()
+            if (_bookTopicIds.value.isEmpty()) refreshCrossBookCounts()
+
+            val ov = _overrides.value
+            val seen = mutableSetOf<Int>()
+            var unmasteredCount = 0
+            var masteredCount = 0
+
+            // 按优先级遍历（高考 > 四级 > 六级），每个 topicId 只计一次
+            for (book in WordBook.entries) {
+                val ids = _bookTopicIds.value[book] ?: continue
+                val status = readMasteryStatus(book)
+                for (id in ids) {
+                    if (seen.add(id)) {
+                        val dbMastered = (status.getOrDefault(id, 1.0)) < 1.0
+                        if (effectiveMastered(id, dbMastered, ov)) masteredCount++
+                        else unmasteredCount++
+                    }
+                }
             }
+            _globalFilteredCounts.value = unmasteredCount to masteredCount
         }
-        return emptySet()
     }
 
-    private fun saveReadMarks(ids: Set<Int>) {
+    private fun loadReadMarks(book: WordBook, filterType: String): Set<Int> {
+        val stored = mmkv.decodeString(readMarksKey(book, filterType))
+        if (stored.isNullOrBlank()) return emptySet()
+        return stored.split(",").mapNotNull { it.toIntOrNull() }.toSet()
+    }
+
+    /** 一次性清理旧的"按词书"key（旧版本未斩/已斩共用一份，会互相污染） */
+    private fun cleanupLegacyReadMarks(book: WordBook) {
+        mmkv.removeValueForKey(legacyReadMarksKey(book))
+        // 更早期的全局 key
+        mmkv.removeValueForKey("read_topic_ids")
+    }
+
+    private fun saveReadMarks(ids: Set<Int>, filterType: String) {
         val book = _currentBook ?: return
         val value = if (ids.isEmpty()) "" else ids.joinToString(",")
-        mmkv.encode(readMarksKey(book), value)
+        mmkv.encode(readMarksKey(book, filterType), value)
     }
 
-    fun markRead(topicId: Int) {
-        val updated = _readTopicIds.value + topicId
-        _readTopicIds.value = updated
-        saveReadMarks(updated)
+    private fun bucketStateFlow(filterType: String): MutableStateFlow<Set<Int>> =
+        if (filterType == FILTER_MASTERED) _readTopicIdsMastered else _readTopicIdsUnmastered
+
+    fun markRead(topicId: Int, filterType: String) {
+        val flow = bucketStateFlow(filterType)
+        val updated = flow.value + topicId
+        flow.value = updated
+        saveReadMarks(updated, filterType)
     }
 
-    fun clearReadMarks() {
+    fun clearReadMarks(filterType: String) {
         val book = _currentBook ?: return
-        _readTopicIds.value = emptySet()
-        mmkv.encode(readMarksKey(book), "")
+        bucketStateFlow(filterType).value = emptySet()
+        mmkv.encode(readMarksKey(book, filterType), "")
     }
 
     private val wordCache = mutableMapOf<WordBook, List<Word>>()
@@ -143,11 +194,17 @@ class WordRepository private constructor(private val appContext: Context) {
         }
     }
 
+    private fun reloadBuckets(book: WordBook) {
+        cleanupLegacyReadMarks(book)
+        _readTopicIdsUnmastered.value = loadReadMarks(book, FILTER_UNMASTERED)
+        _readTopicIdsMastered.value   = loadReadMarks(book, FILTER_MASTERED)
+    }
+
     /** 加载指定词书。forceReload=true 时清除缓存重新读 DB */
     suspend fun loadWords(book: WordBook, forceReload: Boolean = false) {
         if (!forceReload && wordCache.containsKey(book)) {
             _currentBook = book
-            _readTopicIds.value = loadReadMarks(book)
+            reloadBuckets(book)
             _loadState.value = LoadState.Success(wordCache[book]!!)
             return
         }
@@ -185,7 +242,7 @@ class WordRepository private constructor(private val appContext: Context) {
 
                 wordCache[book] = words
                 _currentBook = book
-                _readTopicIds.value = loadReadMarks(book)
+                reloadBuckets(book)
                 _loadState.value = LoadState.Success(words)
             } catch (e: Exception) {
                 _loadState.value = LoadState.Error(e.message ?: "加载失败")
@@ -218,6 +275,7 @@ class WordRepository private constructor(private val appContext: Context) {
 
                 wordCache.clear()
                 _crossBookCounts.value = emptyMap() // 强制下次 loadWords 重新统计
+                _bookTopicIds.value = emptyMap()
                 _syncState.value = SyncState.Success
             } catch (e: Exception) {
                 _syncState.value = SyncState.Error(e.message ?: "同步失败")
@@ -447,12 +505,15 @@ class WordRepository private constructor(private val appContext: Context) {
         val ov = JSONObject()
         _overrides.value.forEach { (k, v) -> ov.put(k.toString(), v) }
         json.put("overrides", ov)
-        // 已读标记：按词书分别导出，key = "readTopicIds_{bookId}"
+        // 已读标记：按词书 + 过滤类型分别导出，key = "readTopicIds_{bookId}_{filterType}"
         for (book in WordBook.entries) {
-            val ids = if (book == _currentBook) _readTopicIds.value else loadReadMarks(book)
-            val arr = JSONArray()
-            ids.forEach { arr.put(it) }
-            json.put("readTopicIds_${book.id}", arr)
+            for (filter in listOf(FILTER_UNMASTERED, FILTER_MASTERED)) {
+                val ids = if (book == _currentBook) bucketStateFlow(filter).value
+                          else loadReadMarks(book, filter)
+                val arr = JSONArray()
+                ids.forEach { arr.put(it) }
+                json.put("readTopicIds_${book.id}_$filter", arr)
+            }
         }
         return json.toString()
     }
@@ -471,14 +532,16 @@ class WordRepository private constructor(private val appContext: Context) {
             _overrides.value = map
             saveOverrides(map)
         }
-        // 覆盖各词书的已读标记
+        // 覆盖各词书 + 过滤类型的已读标记
         for (book in WordBook.entries) {
-            val arr = json.optJSONArray("readTopicIds_${book.id}") ?: continue
-            val ids = mutableSetOf<Int>()
-            for (i in 0 until arr.length()) ids.add(arr.getInt(i))
-            val value = if (ids.isEmpty()) "" else ids.joinToString(",")
-            mmkv.encode(readMarksKey(book), value)
-            if (book == _currentBook) _readTopicIds.value = ids
+            for (filter in listOf(FILTER_UNMASTERED, FILTER_MASTERED)) {
+                val arr = json.optJSONArray("readTopicIds_${book.id}_$filter") ?: continue
+                val ids = mutableSetOf<Int>()
+                for (i in 0 until arr.length()) ids.add(arr.getInt(i))
+                val value = if (ids.isEmpty()) "" else ids.joinToString(",")
+                mmkv.encode(readMarksKey(book, filter), value)
+                if (book == _currentBook) bucketStateFlow(filter).value = ids
+            }
         }
         // 清除词缓存，下次打开列表时重新加载
         wordCache.clear()

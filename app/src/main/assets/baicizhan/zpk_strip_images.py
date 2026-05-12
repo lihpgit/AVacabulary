@@ -29,7 +29,7 @@ from pathlib import Path
 
 ZPAK_MAGIC = b'ZPAK0300'
 INDEX_ENTRY_SIZE = 48
-IMAGE_EXTS = {'.jpg', '.png'}
+IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp'}
 
 
 def parse_zpk(data: bytes):

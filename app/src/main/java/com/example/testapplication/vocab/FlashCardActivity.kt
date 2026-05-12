@@ -1,8 +1,13 @@
 package com.example.testapplication.vocab
 
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import com.tencent.mmkv.MMKV
+import android.media.AudioAttributes
+import android.media.AudioFocusRequest
+import android.media.AudioManager
 import android.media.MediaPlayer
 import android.media.PlaybackParams
 import android.os.Build
@@ -46,66 +51,93 @@ import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import org.json.JSONObject
 import java.io.File
 import java.util.Locale
 import kotlin.math.roundToInt
 
 class FlashCardActivity : ComponentActivity() {
     companion object {
-        const val EXTRA_FILTER      = "filter_type"
-        const val EXTRA_START_INDEX = "start_index"
-        const val EXTRA_BOOK_ID     = "book_id"
+        const val EXTRA_FILTER            = "filter_type"
+        const val EXTRA_START_INDEX       = "start_index"
+        const val EXTRA_BOOK_ID           = "book_id"
+        const val EXTRA_CROSS_BOOK_FILTER = "cross_book_filter"
     }
+
+    internal var mediaSessionToggle: (() -> Unit)? = null
+    internal var mediaSessionNext: (() -> Unit)? = null
+    internal var mediaSessionPrev: (() -> Unit)? = null
+    internal lateinit var mediaSession: android.support.v4.media.session.MediaSessionCompat
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         enableEdgeToEdge()
-        val filterType = intent.getStringExtra(EXTRA_FILTER) ?: "unmastered"
-        val startIndex = intent.getIntExtra(EXTRA_START_INDEX, 0)
-        val bookId     = intent.getIntExtra(EXTRA_BOOK_ID, WordBook.GAOKAO.id)
+
+        mediaSession = android.support.v4.media.session.MediaSessionCompat(this, "FlashCardSession").apply {
+            setCallback(object : android.support.v4.media.session.MediaSessionCompat.Callback() {
+                override fun onPlay()  { mediaSessionToggle?.invoke() }
+                override fun onPause() { mediaSessionToggle?.invoke() }
+                override fun onStop()  { mediaSessionToggle?.invoke() }
+                override fun onSkipToNext()     { mediaSessionNext?.invoke() }
+                override fun onSkipToPrevious() { mediaSessionPrev?.invoke() }
+                override fun onMediaButtonEvent(mediaButtonEvent: Intent?): Boolean {
+                    val event = mediaButtonEvent?.getParcelableExtra<android.view.KeyEvent>(Intent.EXTRA_KEY_EVENT)
+                    if (event?.action == android.view.KeyEvent.ACTION_DOWN) {
+                        when (event.keyCode) {
+                            android.view.KeyEvent.KEYCODE_MEDIA_PLAY,
+                            android.view.KeyEvent.KEYCODE_MEDIA_PAUSE,
+                            android.view.KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,
+                            android.view.KeyEvent.KEYCODE_HEADSETHOOK -> {
+                                mediaSessionToggle?.invoke()
+                                return true
+                            }
+                            android.view.KeyEvent.KEYCODE_MEDIA_NEXT -> {
+                                mediaSessionNext?.invoke()
+                                return true
+                            }
+                            android.view.KeyEvent.KEYCODE_MEDIA_PREVIOUS -> {
+                                mediaSessionPrev?.invoke()
+                                return true
+                            }
+                        }
+                    }
+                    return super.onMediaButtonEvent(mediaButtonEvent)
+                }
+            })
+            isActive = false
+        }
+
+        val filterType      = intent.getStringExtra(EXTRA_FILTER) ?: "unmastered"
+        val startIndex      = intent.getIntExtra(EXTRA_START_INDEX, 0)
+        val bookId          = intent.getIntExtra(EXTRA_BOOK_ID, WordBook.GAOKAO.id)
+        val crossBookFilter = intent.getBooleanExtra(EXTRA_CROSS_BOOK_FILTER, false)
         setContent {
             com.example.testapplication.ui.theme.TestApplicationTheme {
-                FlashCardScreen(filterType, startIndex, bookId)
+                FlashCardScreen(filterType, startIndex, bookId, crossBookFilter)
             }
         }
     }
-}
 
-// ── zpk meta ────────────────────────────────────────────────────
-
-private data class ZpkMeta(
-    val accent: String, val meanCn: String, val meanEn: String,
-    val sentence: String, val sentenceTrans: String,
-    val wordAudio: String, val sentenceAudio: String
-)
-
-private fun parseZpkMeta(files: Map<String, ByteArray>): ZpkMeta? {
-    val bytes = files["meta.json"] ?: return null
-    return try {
-        val j = JSONObject(String(bytes))
-        ZpkMeta(
-            accent        = j.optString("accent", ""),
-            meanCn        = j.optString("mean_cn", ""),
-            meanEn        = j.optString("mean_en", ""),
-            sentence      = j.optString("sentence", ""),
-            sentenceTrans = j.optString("sentence_trans", ""),
-            wordAudio     = j.optString("word_audio", ""),
-            sentenceAudio = j.optString("sentence_audio", "")
-        )
-    } catch (_: Exception) { null }
+    override fun onDestroy() {
+        if (::mediaSession.isInitialized) {
+            mediaSession.isActive = false
+            mediaSession.release()
+        }
+        super.onDestroy()
+        WordPlaybackService.stop(this)
+    }
 }
 
 // ── 主界面 ───────────────────────────────────────────────────────
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun FlashCardScreen(filterType: String, startIndex: Int, bookId: Int) {
+fun FlashCardScreen(filterType: String, startIndex: Int, bookId: Int, crossBookFilter: Boolean = false) {
     val context = LocalContext.current
     val repository = remember { WordRepository.getInstance(context) }
     val overrides       by repository.overrides.collectAsState()
     val crossBookCounts by repository.crossBookCounts.collectAsState()
+    val bookTopicIds    by repository.bookTopicIds.collectAsState()
     val prefs = remember { MMKV.mmkvWithID("flashcard_prefs") }
     val scope = rememberCoroutineScope()
 
@@ -117,14 +149,30 @@ fun FlashCardScreen(filterType: String, startIndex: Int, bookId: Int) {
         }
     }
 
+    // 跨词书过滤：与 WordListActivity 相同逻辑（按 WordBook 枚举顺序优先级递减）
+    val currentBook = WordBook.entries.firstOrNull { it.id == bookId } ?: WordBook.ZHONGKAO
+    val excludedTopicIds = remember(currentBook, bookTopicIds, crossBookFilter) {
+        if (!crossBookFilter) emptySet()
+        else WordBook.entries
+            .takeWhile { it != currentBook }
+            .flatMap { bookTopicIds[it] ?: emptySet() }
+            .toSet()
+    }
+
     val loadStateVal by repository.loadState.collectAsState()
-    val words = remember(loadStateVal, overrides) {
+    val words = remember(loadStateVal, overrides, excludedTopicIds) {
         val state = loadStateVal
         if (state is LoadState.Success && repository.currentBook?.id == bookId) {
             val ov = overrides
             when (filterType) {
-                "mastered" -> state.words.filter { repository.effectiveMastered(it.topicId, it.masteredInDb, ov) }
-                else       -> state.words.filter { !repository.effectiveMastered(it.topicId, it.masteredInDb, ov) }
+                "mastered" -> state.words.filter {
+                    repository.effectiveMastered(it.topicId, it.masteredInDb, ov) &&
+                    it.topicId !in excludedTopicIds
+                }
+                else -> state.words.filter {
+                    !repository.effectiveMastered(it.topicId, it.masteredInDb, ov) &&
+                    it.topicId !in excludedTopicIds
+                }
             }
         } else emptyList()
     }
@@ -143,7 +191,37 @@ fun FlashCardScreen(filterType: String, startIndex: Int, bookId: Int) {
     // ── 持久化设置（MMKV）──
     val autoReadState = remember { mutableStateOf(prefs.decodeBool("auto_read", false)) }
     var autoRead by autoReadState
-    LaunchedEffect(autoRead) { prefs.encode("auto_read", autoRead) }
+    LaunchedEffect(autoRead) {
+        prefs.encode("auto_read", autoRead)
+        if (autoRead) {
+            WordPlaybackService.start(context)
+        } else {
+            WordPlaybackService.stop(context)
+        }
+    }
+    // 监听服务停止广播（用户从通知栏点"停止"时同步关闭 autoRead）
+    // playerRef 用于在 BroadcastReceiver 中安全引用 player（player 在后面声明）
+    val playerRef = remember { mutableStateOf<MediaPlayer?>(null) }
+    DisposableEffect(Unit) {
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(ctx: Context?, intent: Intent?) {
+                if (intent?.action == WordPlaybackService.ACTION_SERVICE_STOPPED) {
+                    autoReadState.value = false
+                    try { playerRef.value?.reset() } catch (_: Exception) {}
+                }
+            }
+        }
+        val filter = IntentFilter(WordPlaybackService.ACTION_SERVICE_STOPPED)
+        if (Build.VERSION.SDK_INT >= 33) {
+            context.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            context.registerReceiver(receiver, filter)
+        }
+        onDispose {
+            context.unregisterReceiver(receiver)
+            WordPlaybackService.stop(context)
+        }
+    }
 
     var speechRate by remember { mutableFloatStateOf(prefs.decodeFloat("speech_rate", 1.0f)) }
     LaunchedEffect(speechRate) { prefs.encode("speech_rate", speechRate) }
@@ -174,10 +252,12 @@ fun FlashCardScreen(filterType: String, startIndex: Int, bookId: Int) {
     val currentRepeatState = remember { mutableIntStateOf(0) }
     var currentRepeat by currentRepeatState
 
-    // 学习轮次（所有单词都读过一遍 = 一轮）
-    var roundCount by remember { mutableIntStateOf(0) }
-    // 从持久化的已读标记恢复
-    val readTopicIds by repository.readTopicIds.collectAsState()
+    // 学习轮次（所有单词都读过一遍 = 一轮），按词书+类型持久化
+    val roundKey = "round_${bookId}_${filterType}"
+    var roundCount by remember { mutableIntStateOf(prefs.decodeInt(roundKey, 0)) }
+    // 从持久化的已读标记恢复（按当前 filterType 取对应桶）
+    val readTopicIdsFlow = remember(filterType) { repository.readTopicIds(filterType) }
+    val readTopicIds by readTopicIdsFlow.collectAsState()
 
     val showTransWhileReadState = remember { mutableStateOf(prefs.decodeBool("show_trans_while_read", false)) }
     var showTransWhileRead by showTransWhileReadState
@@ -202,7 +282,23 @@ fun FlashCardScreen(filterType: String, startIndex: Int, bookId: Int) {
     var zpkMeta  by remember { mutableStateOf<ZpkMeta?>(null) }
 
     // ── 单 MediaPlayer（reset 复用，保持 audio session 热态）──
+    val mediaAudioAttributes = remember {
+        AudioAttributes.Builder()
+            .setUsage(AudioAttributes.USAGE_MEDIA)
+            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+            .build()
+    }
     val player = remember { MediaPlayer() }
+    playerRef.value = player
+    val audioManager = remember { context.getSystemService(Context.AUDIO_SERVICE) as AudioManager }
+    val audioFocusRequest = remember {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+                .setAudioAttributes(mediaAudioAttributes)
+                .setWillPauseWhenDucked(false)
+                .build()
+        } else null
+    }
     val cacheFile = remember { File(context.cacheDir, "zpk_word.mp3") }
     val nextAudioCache = remember { mutableStateOf<Pair<Int, ByteArray>?>(null) }
 
@@ -226,7 +322,12 @@ fun FlashCardScreen(filterType: String, startIndex: Int, bookId: Int) {
     }
 
     DisposableEffect(Unit) {
-        onDispose { player.release() }
+        onDispose {
+            player.release()
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                audioFocusRequest?.let { audioManager.abandonAudioFocusRequest(it) }
+            }
+        }
     }
 
     // ── 导航 ──
@@ -247,10 +348,7 @@ fun FlashCardScreen(filterType: String, startIndex: Int, bookId: Int) {
         val word = words.getOrNull(wordIdx) ?: return null
         val files = if (wordIdx == currentIndex && zpkFiles != null) zpkFiles!!
                     else withContext(Dispatchers.IO) { repository.readZpk(word.topicId) } ?: return null
-        val meta = parseZpkMeta(files)
-        val key = meta?.wordAudio?.ifBlank { null }
-            ?: files.keys.find { it.startsWith("uk_") && it.endsWith(".mp3") }
-        return key?.let { files[it] }
+        return wordAudioBytesFromZpk(files)
     }
 
     fun precacheNext(playingIdx: Int) {
@@ -260,10 +358,7 @@ fun FlashCardScreen(filterType: String, startIndex: Int, bookId: Int) {
             val word = words.getOrNull(nextIdx) ?: return@launch
             val bytes = withContext(Dispatchers.IO) {
                 val files = repository.readZpk(word.topicId) ?: return@withContext null
-                val meta = parseZpkMeta(files)
-                val key = meta?.wordAudio?.ifBlank { null }
-                    ?: files.keys.find { it.startsWith("uk_") && it.endsWith(".mp3") }
-                key?.let { files[it] }
+                wordAudioBytesFromZpk(files)
             } ?: return@launch
             nextAudioCache.value = nextIdx to bytes
         }
@@ -274,6 +369,7 @@ fun FlashCardScreen(filterType: String, startIndex: Int, bookId: Int) {
             val prepared = withContext(Dispatchers.IO) {
                 try {
                     player.reset()
+                    player.setAudioAttributes(mediaAudioAttributes)
                     cacheFile.writeBytes(bytes)
                     player.setDataSource(cacheFile.absolutePath)
                     player.prepare()
@@ -282,6 +378,10 @@ fun FlashCardScreen(filterType: String, startIndex: Int, bookId: Int) {
             }
             if (!prepared) { onComplete?.invoke(); return@launch }
             withContext(Dispatchers.Main) {
+                // 请求音频焦点，防止后台被系统暂停
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    audioFocusRequest?.let { audioManager.requestAudioFocus(it) }
+                }
                 player.setOnCompletionListener { onComplete?.invoke() }
                 if (speechRate != 1.0f && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                     try { player.playbackParams = PlaybackParams().setSpeed(speechRate) } catch (_: Exception) {}
@@ -376,6 +476,76 @@ fun FlashCardScreen(filterType: String, startIndex: Int, bookId: Int) {
         playBytes(bytes)
     }
 
+    // ── 蓝牙/耳机媒体按键：暂停切换 ──
+
+    fun togglePlayPause() {
+        if (!autoRead) return
+        if (!isPaused) {
+            isPaused = true
+            showTranslation = true
+            pauseRepeatsState.intValue = 0
+            pauseFinishedState.value = false
+            try { player.reset() } catch (_: Exception) {}
+        } else {
+            isPaused = false
+            showTranslation = showTransWhileRead
+            if (pauseFinishedState.value) {
+                pauseRepeatsState.intValue = 0
+                pauseFinishedState.value = false
+                advanceToNext(currentIndexState.intValue)
+            } else {
+                pauseRepeatsState.intValue = 0
+                speakWordAt(currentIndexState.intValue)
+            }
+        }
+    }
+
+    fun updateMediaSessionState(playing: Boolean) {
+        val activity = context as? FlashCardActivity ?: return
+        val state = android.support.v4.media.session.PlaybackStateCompat.Builder()
+            .setActions(
+                android.support.v4.media.session.PlaybackStateCompat.ACTION_PLAY or
+                android.support.v4.media.session.PlaybackStateCompat.ACTION_PAUSE or
+                android.support.v4.media.session.PlaybackStateCompat.ACTION_PLAY_PAUSE or
+                android.support.v4.media.session.PlaybackStateCompat.ACTION_STOP or
+                android.support.v4.media.session.PlaybackStateCompat.ACTION_SKIP_TO_NEXT or
+                android.support.v4.media.session.PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS
+            )
+            .setState(
+                if (playing) android.support.v4.media.session.PlaybackStateCompat.STATE_PLAYING
+                else android.support.v4.media.session.PlaybackStateCompat.STATE_PAUSED,
+                android.support.v4.media.session.PlaybackStateCompat.PLAYBACK_POSITION_UNKNOWN,
+                if (playing) 1.0f else 0f
+            )
+            .build()
+        activity.mediaSession.setPlaybackState(state)
+    }
+
+    // 绑定 MediaSession 回调到 Compose 状态
+    DisposableEffect(Unit) {
+        val activity = context as? FlashCardActivity
+        activity?.mediaSessionToggle = { togglePlayPause() }
+        activity?.mediaSessionNext = { goNext() }
+        activity?.mediaSessionPrev = { goPrev() }
+        onDispose {
+            activity?.mediaSessionToggle = null
+            activity?.mediaSessionNext = null
+            activity?.mediaSessionPrev = null
+        }
+    }
+
+    // autoRead / isPaused 变化时同步蓝牙播放状态 + MediaSession 激活状态
+    LaunchedEffect(autoRead, isPaused) {
+        val activity = context as? FlashCardActivity
+        if (autoRead) {
+            activity?.mediaSession?.isActive = true
+            updateMediaSessionState(playing = !isPaused)
+        } else {
+            updateMediaSessionState(playing = false)
+            activity?.mediaSession?.isActive = false
+        }
+    }
+
     // ── 加载 zpk + 自动朗读 ──
 
     val currentWord = words.getOrNull(currentIndex)
@@ -389,15 +559,16 @@ fun FlashCardScreen(filterType: String, startIndex: Int, bookId: Int) {
         isSpeakingSentenceState.value = false
         pauseRepeatsState.intValue = 0
         pauseFinishedState.value = false
-        // 标记当前词为已读
+        // 标记当前词为已读（按 filterType 分桶，避免未斩/已斩互相清空）
         words.getOrNull(currentIndex)?.let { w ->
-            repository.markRead(w.topicId)
+            repository.markRead(w.topicId, filterType)
             // 检查是否所有单词都已读过（一轮完成）
             val allTopicIds = words.map { it.topicId }.toSet()
-            val updatedReadIds = repository.readTopicIds.value
+            val updatedReadIds = readTopicIdsFlow.value
             if (allTopicIds.all { it in updatedReadIds }) {
                 roundCount++
-                repository.clearReadMarks()
+                prefs.encode(roundKey, roundCount)
+                repository.clearReadMarks(filterType)
                 isPaused = true
                 showRoundCompleteDialog = true
             }
@@ -675,9 +846,11 @@ fun FlashCardScreen(filterType: String, startIndex: Int, bookId: Int) {
         val effectiveMastered = repository.effectiveMastered(word.topicId, word.masteredInDb, overrides)
         val wordDisplayColor = if (filterType == "unmastered") {
             when (crossBookCounts[word.topicId] ?: 1) {
-                3    -> Color(0xFFFF9800) // 出现在另外两本词书 → 橙色
-                2    -> Color(0xFF4CAF50) // 出现在另外一本词书 → 绿色
-                else -> Color.Unspecified
+                5    -> Color(0xFFFF5252) // 5 本词书都出现 → 亮红
+                4    -> Color(0xFFE040FB) // 出现 4 次 → 亮紫
+                3    -> Color(0xFFFFD740) // 出现 3 次 → 琥珀黄
+                2    -> Color(0xFF69F0AE) // 出现 2 次 → 薄荷绿
+                else -> Color.Unspecified // 仅当前词书 → 默认白色
             }
         } else Color.Unspecified
         val density = LocalDensity.current
@@ -686,6 +859,7 @@ fun FlashCardScreen(filterType: String, startIndex: Int, bookId: Int) {
             // 使用 scope 的 Dp 属性（满足 BoxWithConstraintsUnusedScope lint 要求）
             val maxWDp = maxWidth
             val maxHDp = maxHeight
+            val isTablet = minOf(maxWDp, maxHDp) >= 600.dp
             val maxW = with(density) { maxWDp.toPx() }
             val maxH = with(density) { maxHDp.toPx() }
             val btnPx = with(density) { 56.dp.toPx() }
@@ -815,7 +989,9 @@ fun FlashCardScreen(filterType: String, startIndex: Int, bookId: Int) {
                             if (showTranslation && displayMeanCn.isNotBlank()) {
                                 Spacer(Modifier.height(8.dp))
                                 Text(
-                                    text = displayMeanCn, fontSize = 22.sp,
+                                    text = displayMeanCn,
+                                    fontSize = if (isTablet) 37.sp else 22.sp,
+                                    lineHeight = if (isTablet) 48.sp else 30.sp,
                                     fontWeight = FontWeight.Medium,
                                     textAlign = TextAlign.Center,
                                     color = MaterialTheme.colorScheme.primary,
@@ -828,7 +1004,7 @@ fun FlashCardScreen(filterType: String, startIndex: Int, bookId: Int) {
                                 Spacer(Modifier.height(10.dp))
                                 Text(
                                     text = displayAccent,
-                                    fontSize = 20.sp,
+                                    fontSize = if (isTablet) 35.sp else 20.sp,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     textAlign = TextAlign.Center
                                 )
@@ -839,7 +1015,8 @@ fun FlashCardScreen(filterType: String, startIndex: Int, bookId: Int) {
                                 Spacer(Modifier.height(12.dp))
                                 Text(
                                     text = displayMeanEn,
-                                    fontSize = 18.sp,
+                                    fontSize = if (isTablet) 33.sp else 18.sp,
+                                    lineHeight = if (isTablet) 44.sp else 24.sp,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     textAlign = TextAlign.Center,
                                     modifier = Modifier.fillMaxWidth()
@@ -858,7 +1035,8 @@ fun FlashCardScreen(filterType: String, startIndex: Int, bookId: Int) {
                                 ) {
                                     Text(
                                         text = displaySentence,
-                                        fontSize = 17.sp,
+                                        fontSize = if (isTablet) 32.sp else 17.sp,
+                                        lineHeight = if (isTablet) 42.sp else 23.sp,
                                         color = MaterialTheme.colorScheme.onSurface,
                                         modifier = Modifier.weight(1f)
                                     )
@@ -873,7 +1051,8 @@ fun FlashCardScreen(filterType: String, startIndex: Int, bookId: Int) {
                                     Spacer(Modifier.height(6.dp))
                                     Text(
                                         text = displaySentenceTrans,
-                                        fontSize = 15.sp,
+                                        fontSize = if (isTablet) 30.sp else 15.sp,
+                                        lineHeight = if (isTablet) 40.sp else 21.sp,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         textAlign = TextAlign.Start,
                                         modifier = Modifier.fillMaxWidth()
@@ -972,10 +1151,8 @@ fun FlashCardScreen(filterType: String, startIndex: Int, bookId: Int) {
             } // Column(fillMaxSize)
 
             // ── 例句朗读覆盖层（无 pointer input，点击透传到卡片）──
-            // 平板判断：最小边 >= 600dp
-            val isTablet = minOf(maxWDp, maxHDp) >= 600.dp
-            val sentenceFontSize = if (isTablet) 85.sp else 50.sp
-            val sentenceLineHeight = if (isTablet) 98.sp else 60.sp
+            val sentenceFontSize = if (isTablet) 95.sp else 50.sp
+            val sentenceLineHeight = if (isTablet) 110.sp else 60.sp
             if (isSpeakingSentenceState.value && sentenceOverlayEnabled && displaySentence.isNotBlank()) {
                 Box(
                     modifier = Modifier
@@ -1000,7 +1177,7 @@ fun FlashCardScreen(filterType: String, startIndex: Int, bookId: Int) {
                             Spacer(Modifier.height(10.dp))
                             Text(
                                 text = displaySentenceTrans,
-                                fontSize = 18.sp,
+                                fontSize = if (isTablet) 33.sp else 18.sp,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 textAlign = TextAlign.Center
                             )

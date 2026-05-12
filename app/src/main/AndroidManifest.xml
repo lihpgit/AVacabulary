@@ -2,22 +2,11 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- WordPlaybackService 后台保活需要 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
-    <uses-permission android:name="android.permission.INTERNET" />
-    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-
-    <!-- Android 11+ 包可见性：声明需查询可启动的应用，否则只能看到本应用 -->
-    <queries>
-        <intent>
-            <action android:name="android.intent.action.MAIN" />
-            <category android:name="android.intent.category.LAUNCHER" />
-        </intent>
-    </queries>
 
     <application
         android:name=".App"
@@ -30,38 +19,18 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.TestApplication"
         tools:targetApi="31">
-        
-        <!-- Xposed Module Meta Data -->
-        <meta-data android:name="xposedmodule" android:value="true" />
-        <meta-data android:name="xposeddescription" android:value="Log prefs + sqlite queries for learned count" />
-        <meta-data android:name="xposedminversion" android:value="82" />
-        
+
         <service
-            android:name=".LightSensorService"
+            android:name=".vocab.WordPlaybackService"
             android:enabled="true"
             android:exported="false"
             android:foregroundServiceType="specialUse">
-            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="sensor_monitor" />
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="word_audio_playback" />
         </service>
 
-        <service
-            android:name=".IpcService"
-            android:enabled="true"
-            android:exported="true"></service>
-        <service
-            android:name=".NetworkSpeedService"
-            android:enabled="true"
-            android:exported="false"
-            android:foregroundServiceType="dataSync" />
-
-        <!-- 自定义桌面页：保留页面能力，但不再作为系统主入口 -->
-        <activity
-            android:name=".LauncherActivity"
-            android:exported="true"
-            android:label="桌面"
-            android:theme="@style/Theme.TestApplication"
-            android:stateNotNeeded="true" />
-        <!-- 主入口改为 MainActivity -->
+        <!-- 入口：透明跳转到 WordListActivity -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -72,18 +41,24 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
-        <activity android:name=".NoiseActivity" android:exported="false" android:label="噪音测试" />
-        <activity android:name=".FlashlightActivity" android:exported="false" android:label="闪光灯测试" />
-        <activity android:name=".tetris.TetrisActivity" android:exported="false" android:label="俄罗斯方块" android:screenOrientation="portrait" />
-        <activity android:name=".RootTestActivity" android:exported="false" android:label="Root测试" />
-        <activity android:name=".DatabaseViewerActivity" android:exported="false" android:label="数据库查看器" />
-        <activity android:name=".ClipboardMonitorActivity" android:exported="false" android:label="剪贴板监控" />
-        <activity android:name=".LightSensorActivity" android:exported="false" android:label="光感测试" />
-        <activity android:name=".IrRemoteActivity" android:exported="false" android:label="红外遥控" />
-        <activity android:name=".NetworkSpeedActivity" android:exported="false" android:label="网络测速" />
-        <activity android:name=".vocab.WordListActivity" android:exported="false" android:label="背单词" />
-        <activity android:name=".vocab.FlashCardActivity" android:exported="false" android:label="刷词" android:screenOrientation="portrait" />
-        <activity android:name=".vocab.SyncActivity" android:exported="false" android:label="同步进度" />
+
+        <activity
+            android:name=".vocab.WordListActivity"
+            android:exported="false"
+            android:label="背单词" />
+        <activity
+            android:name=".vocab.FlashCardActivity"
+            android:exported="false"
+            android:label="刷词"
+            android:screenOrientation="portrait" />
+        <activity
+            android:name=".vocab.SyncActivity"
+            android:exported="false"
+            android:label="同步进度" />
+        <activity
+            android:name=".vocab.SettingsActivity"
+            android:exported="false"
+            android:label="设置" />
     </application>
 
 </manifest>

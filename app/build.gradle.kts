@@ -38,17 +38,15 @@ android {
     }
     buildFeatures {
         compose = true
-        aidl =true
     }
     androidResources {
-        // zpk 是百词斩资源包（内含 mp3），不需要 APK 再压缩
-        noCompress += "zpk"
+        // 不再使用 noCompress "zpk"：5本词书 zpk 总量约 4.4GB，
+        // 不压缩会超过 ZIP32 的 4GB 上限导致 APK 打包失败。
+        // 压缩后约 3.7GB，assets.open() 读取时 Android 会自动解压，功能不受影响。
     }
 }
 
-// 移除临时源码下载任务
 dependencies {
-
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
@@ -59,22 +57,17 @@ dependencies {
     implementation(libs.androidx.ui.tooling.preview)
     implementation(libs.androidx.material3)
     implementation(libs.atomicfu)
-    
-    // 强制下载源码，解决跳转到class文件的问题
-    implementation("androidx.compose.ui:ui:1.7.0") {
-        isTransitive = false
-    }
-    implementation("androidx.compose.material3:material3:1.3.0") {
-        isTransitive = false
-    }
-    
-    // Startup Profile Installer (Compose 启动优化)
+
+    // Compose 启动优化
     implementation("androidx.profileinstaller:profileinstaller:1.3.1")
 
-    // MMKV 高性能 KV 存储
+    // MediaSession：蓝牙/耳机媒体按键控制
+    implementation("androidx.media:media:1.7.0")
+
+    // MMKV：高性能 KV 存储（斩/取消斩、已读标记、播放设置等）
     implementation("com.tencent:mmkv:2.0.2")
 
-    // ZXing 二维码生成 + 扫描
+    // ZXing：同步进度页的二维码生成 + 扫描
     implementation("com.journeyapps:zxing-android-embedded:4.3.0")
 
     testImplementation(libs.junit)
@@ -84,8 +77,6 @@ dependencies {
     androidTestImplementation(libs.androidx.ui.test.junit4)
     debugImplementation(libs.androidx.ui.tooling)
     debugImplementation(libs.androidx.ui.test.manifest)
-    compileOnly("de.robv.android.xposed:api:82")
-//    compileOnly("de.robv.android.xposed:api:82:sources")
 }
 
 // 兼容 Java 工具链：部分 IDE/扩展会调用 testClasses，Android 项目默认无此任务
