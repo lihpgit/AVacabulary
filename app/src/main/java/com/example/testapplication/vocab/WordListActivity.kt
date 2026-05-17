@@ -26,6 +26,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -145,8 +146,11 @@ fun WordListScreen() {
     var selectedTab    by remember { mutableIntStateOf(0) }
     var searchQuery    by remember { mutableStateOf("") }
     var showBookPickDialog by remember { mutableStateOf(false) }
+    var editMode           by remember { mutableStateOf(false) }
     var filterEnabled      by remember { mutableStateOf(prefs.decodeBool("cross_book_filter", false)) }
     LaunchedEffect(filterEnabled) { prefs.encode("cross_book_filter", filterEnabled) }
+    // 切换 Tab 或词书时退出编辑模式
+    LaunchedEffect(selectedTab, selectedBook) { editMode = false }
 
     // 过滤开启时计算全词书去重总数（overrides 变化时也刷新）
     LaunchedEffect(filterEnabled, overrides) {
@@ -305,12 +309,26 @@ fun WordListScreen() {
                     .padding(horizontal = 12.dp, vertical = 2.dp)
             )
 
-            // ── 未斩 / 已斩 Tab ─────────────────────────────────
-            TabRow(selectedTabIndex = selectedTab) {
-                Tab(selected = selectedTab == 0, onClick = { selectedTab = 0; searchQuery = "" },
-                    text = { Text("未斩（${unmastered.size}）") })
-                Tab(selected = selectedTab == 1, onClick = { selectedTab = 1; searchQuery = "" },
-                    text = { Text("已斩（${mastered.size}）") })
+            // ── 未斩 / 已斩 Tab + 编辑按钮 ──────────────────────
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                TabRow(
+                    selectedTabIndex = selectedTab,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Tab(selected = selectedTab == 0, onClick = { selectedTab = 0; searchQuery = "" },
+                        text = { Text("未斩（${unmastered.size}）") })
+                    Tab(selected = selectedTab == 1, onClick = { selectedTab = 1; searchQuery = "" },
+                        text = { Text("已斩（${mastered.size}）") })
+                }
+                TextButton(
+                    onClick = { editMode = !editMode },
+                    modifier = Modifier.padding(horizontal = 4.dp)
+                ) {
+                    Text(if (editMode) "完成" else "编辑")
+                }
             }
 
             // ── 内容区 ──────────────────────────────────────────
@@ -371,21 +389,33 @@ fun WordListScreen() {
                                     val isRead = readTopicIds.contains(word.topicId)
                                     val crossBookCount = if (selectedTab == 0)
                                         crossBookCounts[word.topicId] ?: 1 else 1
-                                    WordListItem(word = word, index = idx + 1, isRead = isRead,
+                                    WordListItem(
+                                        word = word, index = idx + 1, isRead = isRead,
                                         crossBookCount = crossBookCount,
+                                        editMode = editMode,
+                                        isUnmastered = (selectedTab == 0),
+                                        onToggleMastered = {
+                                            val currentEffective = repository.effectiveMastered(
+                                                word.topicId, word.masteredInDb, overrides)
+                                            scope.launch {
+                                                repository.toggleMastered(word.topicId, currentEffective)
+                                            }
+                                            playWordPreview(word)
+                                        },
                                         onRevealTranslationAndPlay = { playWordPreview(word) },
                                         onWordClick = {
-                                        context.startActivity(
-                                            Intent(context, FlashCardActivity::class.java).apply {
-                                                putExtra(FlashCardActivity.EXTRA_FILTER,
-                                                    if (selectedTab == 0) "unmastered" else "mastered")
-                                                putExtra(FlashCardActivity.EXTRA_START_INDEX,
-                                                    indexInBase.coerceAtLeast(0))
-                                                putExtra(FlashCardActivity.EXTRA_BOOK_ID, selectedBook.id)
-                                                putExtra(FlashCardActivity.EXTRA_CROSS_BOOK_FILTER, filterEnabled)
-                                            }
-                                        )
-                                    })
+                                            context.startActivity(
+                                                Intent(context, FlashCardActivity::class.java).apply {
+                                                    putExtra(FlashCardActivity.EXTRA_FILTER,
+                                                        if (selectedTab == 0) "unmastered" else "mastered")
+                                                    putExtra(FlashCardActivity.EXTRA_START_INDEX,
+                                                        indexInBase.coerceAtLeast(0))
+                                                    putExtra(FlashCardActivity.EXTRA_BOOK_ID, selectedBook.id)
+                                                    putExtra(FlashCardActivity.EXTRA_CROSS_BOOK_FILTER, filterEnabled)
+                                                }
+                                            )
+                                        }
+                                    )
                                     HorizontalDivider()
                                 }
                             }
@@ -580,6 +610,12 @@ private fun WordCellScaledText(
 private fun WordListItem(
     word: Word, index: Int, isRead: Boolean,
     crossBookCount: Int = 1,
+    /** 编辑模式：右侧显示「斩」按钮 */
+    editMode: Boolean = false,
+    /** true = 当前条目在未斩列表；false = 已斩列表 */
+    isUnmastered: Boolean = true,
+    /** 点击斩按钮：切换掌握状态 */
+    onToggleMastered: () -> Unit = {},
     /** 点击释义区域：首次显示翻译并播报；再次点击可重复播报 */
     onRevealTranslationAndPlay: () -> Unit,
     /** 点击左侧单词区域：进入闪卡 */
@@ -659,6 +695,27 @@ private fun WordListItem(
                     .align(Alignment.TopEnd)
                     .padding(top = 0.dp, end = 0.dp)
             )
+        }
+        // 编辑模式：斩按钮（未斩=红色；已斩=灰色中划线）
+        if (editMode) {
+            Box(
+                modifier = Modifier
+                    .width(44.dp)
+                    .heightIn(min = 64.dp)
+                    .clickable(onClick = onToggleMastered),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = "斩",
+                    fontSize = 17.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = if (isUnmastered)
+                        MaterialTheme.colorScheme.error
+                    else
+                        MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.45f),
+                    textDecoration = if (isUnmastered) null else TextDecoration.LineThrough,
+                )
+            }
         }
     }
 }
