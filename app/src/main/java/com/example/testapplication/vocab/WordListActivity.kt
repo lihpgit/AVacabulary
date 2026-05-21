@@ -381,7 +381,7 @@ fun WordListScreen() {
                             LazyColumn(
                                 modifier = Modifier
                                     .fillMaxSize()
-                                    .padding(end = 38.dp),
+                                    .padding(end = 28.dp),
                                 state = listState,
                             ) {
                                 itemsIndexed(displayList) { idx, word ->
@@ -471,17 +471,17 @@ private fun FloatingAlphabetSidebar(
     Box(
         modifier = modifier
             .fillMaxHeight()
-            .width(34.dp)
-            .padding(vertical = 4.dp),
+            .width(28.dp)
+            .padding(vertical = 2.dp),
         contentAlignment = Alignment.CenterEnd,
     ) {
         Column(
             modifier = Modifier
-                .fillMaxHeight(0.72f)
-                .width(28.dp)
+                .fillMaxHeight()
+                .width(24.dp)
                 .background(
                     color = MaterialTheme.colorScheme.surface.copy(alpha = 0.52f),
-                    shape = RoundedCornerShape(14.dp),
+                    shape = RoundedCornerShape(12.dp),
                 )
                 .pointerInput(letterToFirstIndex, listState, scope, displayList) {
                     fun scrollAt(py: Float) {
@@ -631,9 +631,7 @@ private fun WordListItem(
         else -> Color.Unspecified // 仅当前词书 → 默认白色
     }
     Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp),
+        modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically
     ) {
         // 左侧宽约条目 1/5（weight 1:4）：点击进闪卡
@@ -663,6 +661,7 @@ private fun WordListItem(
             )
         }
         // 右侧：默认隐藏释义；点击显示翻译（最多两行）并播报
+        // 序号悬浮在翻译上方（70% 透明度），编辑模式的斩按钮叠在序号上（50% 透明度）
         Box(
             modifier = Modifier
                 .weight(4f)
@@ -679,8 +678,7 @@ private fun WordListItem(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .align(Alignment.CenterStart)
-                        .padding(end = 18.dp),
+                        .align(Alignment.CenterStart),
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -690,31 +688,30 @@ private fun WordListItem(
                 fontSize = 9.sp,
                 lineHeight = 10.sp,
                 fontWeight = FontWeight.Normal,
-                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.28f),
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.70f),
                 modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .padding(top = 0.dp, end = 0.dp)
+                    .align(Alignment.CenterEnd)
             )
-        }
-        // 编辑模式：斩按钮（未斩=红色；已斩=灰色中划线）
-        if (editMode) {
-            Box(
-                modifier = Modifier
-                    .width(44.dp)
-                    .heightIn(min = 64.dp)
-                    .clickable(onClick = onToggleMastered),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    text = "斩",
-                    fontSize = 17.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = if (isUnmastered)
-                        MaterialTheme.colorScheme.error
-                    else
-                        MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.45f),
-                    textDecoration = if (isUnmastered) null else TextDecoration.LineThrough,
-                )
+            if (editMode) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.CenterEnd)
+                        .fillMaxHeight()
+                        .clickable(onClick = onToggleMastered)
+                        .padding(horizontal = 5.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = "斩",
+                        fontSize = 17.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = (if (isUnmastered)
+                            MaterialTheme.colorScheme.error
+                        else
+                            MaterialTheme.colorScheme.onSurfaceVariant).copy(alpha = 0.50f),
+                        textDecoration = if (isUnmastered) null else TextDecoration.LineThrough,
+                    )
+                }
             }
         }
     }

@@ -13,6 +13,19 @@ data class ZpkMeta(
     val sentenceAudio: String,
 )
 
+/**
+ * zpk 内 resource.json 的单条例句数据。
+ *
+ * @param sentenceEn  英文例句
+ * @param translate   中文翻译
+ * @param audio       对应的音频文件名（与 zpk 内文件名一致）
+ */
+data class ZpkSentence(
+    val sentenceEn: String,
+    val translate: String,
+    val audio: String,
+)
+
 fun parseZpkMeta(files: Map<String, ByteArray>): ZpkMeta? {
     val bytes = files["meta.json"] ?: return null
     return try {
@@ -39,4 +52,34 @@ fun wordAudioBytesFromZpk(files: Map<String, ByteArray>): ByteArray? {
     val key = meta?.wordAudio?.ifBlank { null }
         ?: files.keys.find { it.startsWith("uk_") && it.endsWith(".mp3") }
     return key?.let { files[it] }
+}
+
+/**
+ * 解析 zpk 内 resource.json 的 sentences 数组，返回所有可用例句列表。
+ * 仅保留 audio 文件在 zpk 内实际存在的条目，避免播放时找不到文件。
+ * resource.json 不存在时返回空列表。
+ */
+fun parseZpkSentences(files: Map<String, ByteArray>): List<ZpkSentence> {
+    val bytes = files["resource.json"] ?: return emptyList()
+    return try {
+        val j = JSONObject(String(bytes))
+        val arr = j.optJSONArray("sentences") ?: return emptyList()
+        val result = mutableListOf<ZpkSentence>()
+        for (i in 0 until arr.length()) {
+            val item = arr.optJSONObject(i) ?: continue
+            val audio = item.optString("audio", "")
+            // 只保留 audio 文件在 zpk 内实际存在的条目
+            if (audio.isBlank() || !files.containsKey(audio)) continue
+            result.add(
+                ZpkSentence(
+                    sentenceEn = item.optString("sentenceEn", ""),
+                    translate  = item.optString("translate", ""),
+                    audio      = audio,
+                )
+            )
+        }
+        result
+    } catch (_: Exception) {
+        emptyList()
+    }
 }

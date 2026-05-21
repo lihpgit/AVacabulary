@@ -281,6 +281,14 @@ fun FlashCardScreen(filterType: String, startIndex: Int, bookId: Int, crossBookF
     var zpkFiles by remember { mutableStateOf<Map<String, ByteArray>?>(null) }
     var zpkMeta  by remember { mutableStateOf<ZpkMeta?>(null) }
 
+    // 多例句轮播状态
+    val zpkSentencesState               = remember { mutableStateOf<List<ZpkSentence>>(emptyList()) }
+    // 当前展示的例句索引（仅在"正向进入"时推进，手动上一个/下一个不推进）
+    val currentSentenceDisplayIndexState = remember { mutableIntStateOf(0) }
+    // 控制下次加载单词时是否推进例句索引：初始为 true（从列表进入闪卡），
+    // 之后仅 advanceToNext() 会重置为 true
+    val advanceSentenceOnNextLoadState   = remember { mutableStateOf(true) }
+
     // ── 单 MediaPlayer（reset 复用，保持 audio session 热态）──
     val mediaAudioAttributes = remember {
         AudioAttributes.Builder()
@@ -333,6 +341,7 @@ fun FlashCardScreen(filterType: String, startIndex: Int, bookId: Int, crossBookF
     // ── 导航 ──
 
     fun advanceToNext(fromIdx: Int) {
+        advanceSentenceOnNextLoadState.value = true
         currentIndexState.intValue = if (fromIdx + 1 >= words.size) 0 else fromIdx + 1
     }
 
@@ -436,7 +445,9 @@ fun FlashCardScreen(filterType: String, startIndex: Int, bookId: Int, crossBookF
 
                 // 是否朗读例句
                 if (readSentenceState.value) {
-                    val sKey = zpkMeta?.sentenceAudio
+                    val sKey = zpkSentencesState.value
+                        .getOrNull(currentSentenceDisplayIndexState.intValue)?.audio
+                        ?: zpkMeta?.sentenceAudio
                     val sBytes = if (!sKey.isNullOrBlank()) zpkFiles?.get(sKey) else null
                     if (sBytes != null) {
                         currentSentenceRepeatState.intValue = 0
@@ -470,9 +481,11 @@ fun FlashCardScreen(filterType: String, startIndex: Int, bookId: Int, crossBookF
     }
 
     fun speakSentence() {
-        val meta = zpkMeta ?: return
-        if (meta.sentenceAudio.isBlank()) return
-        val bytes = zpkFiles?.get(meta.sentenceAudio) ?: return
+        val audioKey = zpkSentencesState.value
+            .getOrNull(currentSentenceDisplayIndexState.intValue)?.audio
+            ?: zpkMeta?.sentenceAudio?.takeIf { it.isNotBlank() }
+            ?: return
+        val bytes = zpkFiles?.get(audioKey) ?: return
         playBytes(bytes)
     }
 
@@ -578,17 +591,41 @@ fun FlashCardScreen(filterType: String, startIndex: Int, bookId: Int, crossBookF
             val files = repository.readZpk(word.topicId)
             zpkFiles = files
             zpkMeta = files?.let { parseZpkMeta(it) }
+            zpkSentencesState.value = files?.let { parseZpkSentences(it) } ?: emptyList()
         }
+
+        // 多例句轮播：根据 advanceSentenceOnNextLoad 决定是否推进索引
+        val sentences = zpkSentencesState.value
+        if (sentences.isNotEmpty()) {
+            val mmkvKey = "sentence_idx_${word.topicId}"
+            val storedIdx = prefs.decodeInt(mmkvKey, 0).coerceIn(0, sentences.size - 1)
+            currentSentenceDisplayIndexState.intValue = storedIdx
+            if (advanceSentenceOnNextLoadState.value) {
+                // 写入下次该词应播放的索引（循环取模）
+                prefs.encode(mmkvKey, (storedIdx + 1) % sentences.size)
+            }
+        } else {
+            currentSentenceDisplayIndexState.intValue = 0
+        }
+        // 无论是否推进，消耗本次标记（下次需要 advanceToNext 显式重置）
+        advanceSentenceOnNextLoadState.value = false
+
         if (autoRead) speakWordAt(currentIndex)
     }
 
     val displayAccent        = currentWord?.accent?.ifBlank { zpkMeta?.accent ?: "" } ?: ""
     val displayMeanCn        = currentWord?.meanCn?.ifBlank { zpkMeta?.meanCn ?: "" } ?: ""
     val displayMeanEn        = zpkMeta?.meanEn ?: ""
-    val displaySentence      = currentWord?.sentence?.ifBlank { zpkMeta?.sentence ?: "" } ?: ""
-    val displaySentenceTrans = currentWord?.sentenceTrans?.ifBlank { zpkMeta?.sentenceTrans ?: "" } ?: ""
-    val hasSentenceAudio     = zpkMeta?.sentenceAudio?.isNotBlank() == true
-            && zpkFiles?.containsKey(zpkMeta?.sentenceAudio) == true
+    // 优先用当前轮播例句的文字，fallback 到 DB/meta 单条例句
+    val currentZpkSentence   = zpkSentencesState.value.getOrNull(currentSentenceDisplayIndexState.intValue)
+    val displaySentence      = currentZpkSentence?.sentenceEn?.ifBlank { null }
+        ?: currentWord?.sentence?.ifBlank { zpkMeta?.sentence ?: "" } ?: ""
+    val displaySentenceTrans = currentZpkSentence?.translate?.ifBlank { null }
+        ?: currentWord?.sentenceTrans?.ifBlank { zpkMeta?.sentenceTrans ?: "" } ?: ""
+    // parseZpkSentences 已验证 audio 存在于 zpk，currentZpkSentence != null 即代表有音频
+    val hasSentenceAudio     = currentZpkSentence != null
+        || (zpkMeta?.sentenceAudio?.isNotBlank() == true
+            && zpkFiles?.containsKey(zpkMeta?.sentenceAudio) == true)
 
     // ── 对话框 ──
 
@@ -646,7 +683,7 @@ fun FlashCardScreen(filterType: String, startIndex: Int, bookId: Int, crossBookF
                     // 单词朗读遍数
                     Text("单词朗读遍数", fontWeight = FontWeight.Medium)
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        (1..3).forEach { n ->
+                        (1..6).forEach { n ->
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
                                 modifier = Modifier

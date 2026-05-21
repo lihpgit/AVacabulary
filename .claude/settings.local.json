@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(./gradlew assembleDebug)",
+      "Bash(shuf -n 200)",
+      "Bash(read f *)",
+      "Bash(python3 -c ' *)",
+      "Bash(awk -F'\\\\t' '{t+=$1;j+=$2;m+=$3;a+=$4;o+=$5;n+=$6;c++} END{printf \"samples=%d\\\\ntotal=%.1fMB\\\\njson=%.1fMB \\(%.1f%%\\)\\\\nmp3=%.1fMB \\(%.1f%%\\)\\\\naac=%.1fMB \\(%.1f%%\\)\\\\nother=%.1fMB \\(%.1f%%\\)\\\\navg_files_per_zpk=%.1f\\\\n\", c, t/1048576, j/1048576, j*100/t, m/1048576, m*100/t, a/1048576, a*100/t, o/1048576, o*100/t, n/c}')",
+      "Bash(grep -v \"^.*//.*$\")",
+      "Bash(python3)",
+      "Skill(feature-development-workflow)",
+      "Skill(feature-development-workflow:*)"
+    ]
+  }
+}
