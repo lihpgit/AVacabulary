@@ -259,6 +259,20 @@ fun WordListScreen() {
                     }
                 },
                 actions = {
+                    // 语境猜词入口
+                    TextButton(onClick = {
+                        context.startActivity(
+                            Intent(context, ContextGuessActivity::class.java).apply {
+                                putExtra(ContextGuessActivity.EXTRA_FILTER,
+                                    if (selectedTab == 0) "unmastered" else "mastered")
+                                putExtra(ContextGuessActivity.EXTRA_START_INDEX, 0)
+                                putExtra(ContextGuessActivity.EXTRA_BOOK_ID, selectedBook.id)
+                                putExtra(ContextGuessActivity.EXTRA_CROSS_BOOK_FILTER, filterEnabled)
+                            }
+                        )
+                    }) {
+                        Text("猜词", fontSize = 13.sp)
+                    }
                     IconButton(onClick = {
                         context.startActivity(Intent(context, SettingsActivity::class.java))
                     }) {

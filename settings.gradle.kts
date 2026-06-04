@@ -24,4 +24,6 @@ dependencyResolutionManagement {
 
 rootProject.name = "TestApplication"
 include(":app")
+include(":core")
+include(":desktop")
  

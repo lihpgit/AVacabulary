@@ -13,3 +13,5 @@
 .externalNativeBuild
 .cxx
 local.properties
+# Mac 桌面版运行时数据（进度/设置），不入库
+/mac_data
