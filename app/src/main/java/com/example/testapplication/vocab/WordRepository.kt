@@ -31,13 +31,24 @@ class WordRepository private constructor(private val appContext: Context) {
         private const val PREFS_NAME = "word_overrides"     // MMKV ID
         private const val KEY_OVERRIDES = "overrides_json"  // MMKV key，存 JSON 字符串
         private const val READ_MARKS_PREFS = "read_marks"
+        private const val NOT_RECOGNIZED_PREFS = "word_not_recognized" // MMKV ID
+        private const val KEY_NOT_RECOGNIZED  = "not_recognized_json"  // 存 JSON 数组字符串
 
+        // 4 种过滤视图：未斩 / 已斩 / 未斩不认识 / 已斩不认识
+        // “不认识”= 浏览（猜词）时查看过翻译，与斩/未斩正交
         const val FILTER_UNMASTERED = "unmastered"
         const val FILTER_MASTERED   = "mastered"
+        const val FILTER_UNMASTERED_UNKNOWN = "unmastered_unknown"
+        const val FILTER_MASTERED_UNKNOWN   = "mastered_unknown"
+
+        /** 把 4 种过滤类型归并到 2 个已读分桶（不认识沿用对应斩状态的桶） */
+        private fun baseFilter(filterType: String): String =
+            if (filterType == FILTER_MASTERED || filterType == FILTER_MASTERED_UNKNOWN)
+                FILTER_MASTERED else FILTER_UNMASTERED
 
         // 已读标记按词书 + 过滤类型隔离：key = "read_topic_ids_{bookId}_{filterType}"
         private fun readMarksKey(book: WordBook, filterType: String) =
-            "read_topic_ids_${book.id}_$filterType"
+            "read_topic_ids_${book.id}_${baseFilter(filterType)}"
         // 旧版 key（只按词书隔离），仅用于一次性清理
         private fun legacyReadMarksKey(book: WordBook) = "read_topic_ids_${book.id}"
 
@@ -83,7 +94,12 @@ class WordRepository private constructor(private val appContext: Context) {
 
     /** 按 filterType 取对应桶的已读标记 StateFlow */
     fun readTopicIds(filterType: String): StateFlow<Set<Int>> =
-        if (filterType == FILTER_MASTERED) _readTopicIdsMastered else _readTopicIdsUnmastered
+        if (baseFilter(filterType) == FILTER_MASTERED) _readTopicIdsMastered else _readTopicIdsUnmastered
+
+    // ── “不认识”集合（全局 topicId，跨词书唯一）──
+    private val mmkvNotRecognized = MMKV.mmkvWithID(NOT_RECOGNIZED_PREFS)
+    private val _notRecognized = MutableStateFlow<Set<Int>>(emptySet())
+    val notRecognized: StateFlow<Set<Int>> = _notRecognized
 
     // topicId 在所有词书中出现的次数（1=仅当前词书，2=另有1本，3=另有2本）
     private val _crossBookCounts = MutableStateFlow<Map<Int, Int>>(emptyMap())
@@ -160,7 +176,7 @@ class WordRepository private constructor(private val appContext: Context) {
     }
 
     private fun bucketStateFlow(filterType: String): MutableStateFlow<Set<Int>> =
-        if (filterType == FILTER_MASTERED) _readTopicIdsMastered else _readTopicIdsUnmastered
+        if (baseFilter(filterType) == FILTER_MASTERED) _readTopicIdsMastered else _readTopicIdsUnmastered
 
     fun markRead(topicId: Int, filterType: String) {
         val flow = bucketStateFlow(filterType)
@@ -191,6 +207,53 @@ class WordRepository private constructor(private val appContext: Context) {
                 }
                 _overrides.value = map
             } catch (_: Exception) {}
+        }
+
+        // 从 MMKV 加载“不认识”集合（JSON 数组）
+        val storedNr = mmkvNotRecognized.decodeString(KEY_NOT_RECOGNIZED)
+        if (!storedNr.isNullOrBlank()) {
+            try {
+                val arr = JSONArray(storedNr)
+                val set = mutableSetOf<Int>()
+                for (i in 0 until arr.length()) set.add(arr.getInt(i))
+                _notRecognized.value = set
+            } catch (_: Exception) {}
+        }
+    }
+
+    private fun saveNotRecognized() {
+        val arr = JSONArray()
+        _notRecognized.value.forEach { arr.put(it) }
+        mmkvNotRecognized.encode(KEY_NOT_RECOGNIZED, arr.toString())
+    }
+
+    /** 浏览时查看翻译 → 标记为“不认识” */
+    fun markNotRecognized(topicId: Int) {
+        if (topicId in _notRecognized.value) return
+        _notRecognized.value = _notRecognized.value + topicId
+        saveNotRecognized()
+    }
+
+    /** 浏览时未查看翻译 → 从“不认识”移出 */
+    fun unmarkNotRecognized(topicId: Int) {
+        if (topicId !in _notRecognized.value) return
+        _notRecognized.value = _notRecognized.value - topicId
+        saveNotRecognized()
+    }
+
+    /** 统一过滤判定：4 种视图共用，避免各 Activity 重复实现 */
+    fun matchesFilter(
+        word: Word,
+        filterType: String,
+        overrides: Map<Int, Boolean>,
+        notRecognized: Set<Int>,
+    ): Boolean {
+        val mastered = effectiveMastered(word.topicId, word.masteredInDb, overrides)
+        return when (filterType) {
+            FILTER_MASTERED            -> mastered
+            FILTER_UNMASTERED_UNKNOWN  -> !mastered && word.topicId in notRecognized
+            FILTER_MASTERED_UNKNOWN    -> mastered  && word.topicId in notRecognized
+            else                       -> !mastered // FILTER_UNMASTERED
         }
     }
 
@@ -505,6 +568,10 @@ class WordRepository private constructor(private val appContext: Context) {
         val ov = JSONObject()
         _overrides.value.forEach { (k, v) -> ov.put(k.toString(), v) }
         json.put("overrides", ov)
+        // “不认识”集合（全局，topicId 跨词书唯一）
+        val nr = JSONArray()
+        _notRecognized.value.forEach { nr.put(it) }
+        json.put("notRecognized", nr)
         // 已读标记：按词书 + 过滤类型分别导出，key = "readTopicIds_{bookId}_{filterType}"
         for (book in WordBook.entries) {
             for (filter in listOf(FILTER_UNMASTERED, FILTER_MASTERED)) {
@@ -531,6 +598,14 @@ class WordRepository private constructor(private val appContext: Context) {
             }
             _overrides.value = map
             saveOverrides(map)
+        }
+        // 覆盖“不认识”集合
+        val nr = json.optJSONArray("notRecognized")
+        if (nr != null) {
+            val set = mutableSetOf<Int>()
+            for (i in 0 until nr.length()) set.add(nr.getInt(i))
+            _notRecognized.value = set
+            saveNotRecognized()
         }
         // 覆盖各词书 + 过滤类型的已读标记
         for (book in WordBook.entries) {

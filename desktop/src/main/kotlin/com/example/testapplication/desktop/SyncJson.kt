@@ -1,5 +1,6 @@
 package com.example.testapplication.desktop
 
+import org.json.JSONArray
 import org.json.JSONObject
 
 /**
@@ -12,12 +13,24 @@ import org.json.JSONObject
  */
 object SyncJson {
 
-    fun export(overrides: Map<Int, Boolean>): String {
+    fun export(overrides: Map<Int, Boolean>, notRecognized: Set<Int> = emptySet()): String {
         val root = JSONObject()
         val ov = JSONObject()
         overrides.forEach { (k, v) -> ov.put(k.toString(), v) }
         root.put("overrides", ov)
+        val nr = JSONArray()
+        notRecognized.forEach { nr.put(it) }
+        root.put("notRecognized", nr)
         return root.toString()
+    }
+
+    fun importNotRecognized(jsonStr: String): Set<Int> {
+        val cleaned = jsonStr.dropWhile { it.code == 0xFEFF || it.isWhitespace() }
+        val root = JSONObject(cleaned)
+        val arr = root.optJSONArray("notRecognized") ?: return emptySet()
+        val set = mutableSetOf<Int>()
+        for (i in 0 until arr.length()) set.add(arr.getInt(i))
+        return set
     }
 
     fun importOverrides(jsonStr: String): Map<Int, Boolean> {

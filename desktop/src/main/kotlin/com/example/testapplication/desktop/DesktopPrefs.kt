@@ -1,5 +1,6 @@
 package com.example.testapplication.desktop
 
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 
@@ -37,5 +38,19 @@ class DesktopPrefs {
         val ov = JSONObject()
         map.forEach { (k, v) -> ov.put(k.toString(), v) }
         json.put("overrides", ov); persist()
+    }
+
+    // ── “不认识”集合（全局 topicId）──
+    fun loadNotRecognized(): Set<Int> {
+        val arr = json.optJSONArray("notRecognized") ?: return emptySet()
+        val set = mutableSetOf<Int>()
+        for (i in 0 until arr.length()) set.add(arr.getInt(i))
+        return set
+    }
+
+    fun saveNotRecognized(set: Set<Int>) {
+        val arr = JSONArray()
+        set.forEach { arr.put(it) }
+        json.put("notRecognized", arr); persist()
     }
 }

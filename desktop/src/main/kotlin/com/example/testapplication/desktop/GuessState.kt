@@ -26,6 +26,13 @@ internal const val READ_SENTENCE_ONLY = 1
 internal const val READ_BOTH_WORD_FIRST = 2
 internal const val READ_BOTH_SENTENCE_FIRST = 3
 
+// 4 种过滤视图：未斩 / 已斩 / 未斩不认识 / 已斩不认识
+// “不认识”= 猜词时查看过翻译，与斩/未斩正交
+internal const val FILTER_UNMASTERED = 0
+internal const val FILTER_MASTERED = 1
+internal const val FILTER_UNMASTERED_UNKNOWN = 2
+internal const val FILTER_MASTERED_UNKNOWN = 3
+
 /**
  * 猜词页的全部状态 + 逻辑，独立于任何窗口。
  *
@@ -42,10 +49,19 @@ class GuessState(
         WordBook.entries.firstOrNull { it.id == prefs.getInt("selected_book_id", WordBook.ZHONGKAO.id) }
             ?: WordBook.ZHONGKAO
     )
-    var filterMastered by mutableStateOf(false)          // false=未斩
+    var filterMode by mutableIntStateOf(prefs.getInt("filter_mode", FILTER_UNMASTERED))
     var crossBookFilter by mutableStateOf(prefs.getInt("cross_book_filter", 0) == 1)
     var overrides by mutableStateOf(prefs.loadOverrides())
     var readMode by mutableIntStateOf(prefs.getInt("read_mode", READ_BOTH_WORD_FIRST))
+
+    // “不认识”集合（全局 topicId）+ 会话快照（切换视图/词书才刷新，浏览中列表稳定）
+    var notRecognized by mutableStateOf(prefs.loadNotRecognized())
+    private var nrSnapshot by mutableStateOf(prefs.loadNotRecognized())
+    // 本词本次浏览是否查看过翻译（决定离开时是否从“不认识”移出）
+    private var revealedThisVisit by mutableStateOf(false)
+
+    /** 普通窗口：鼠标离开后是否自动变透明（默认开） */
+    var autoTransparent by mutableStateOf(prefs.getInt("auto_transparent", 1) == 1)
 
     var allWords by mutableStateOf<List<Word>>(emptyList())
     var loading by mutableStateOf(true)
@@ -70,11 +86,20 @@ class GuessState(
     }
     val excluded: Set<Int> get() = excludedState.value
 
+    private fun matches(w: Word, mode: Int, nr: Set<Int>): Boolean {
+        val mastered = overrides[w.topicId] ?: w.masteredInDb
+        return when (mode) {
+            FILTER_MASTERED           -> mastered
+            FILTER_UNMASTERED_UNKNOWN -> !mastered && w.topicId in nr
+            FILTER_MASTERED_UNKNOWN   -> mastered  && w.topicId in nr
+            else                      -> !mastered // FILTER_UNMASTERED
+        }
+    }
+
     private val wordsState = derivedStateOf {
         val ex = excludedState.value
-        allWords.filter {
-            (overrides[it.topicId] ?: it.masteredInDb) == filterMastered && it.topicId !in ex
-        }
+        val nr = nrSnapshot
+        allWords.filter { matches(it, filterMode, nr) && it.topicId !in ex }
     }
     val words: List<Word> get() = wordsState.value
 
@@ -83,8 +108,23 @@ class GuessState(
     val effectiveMastered: Boolean
         get() = currentWord?.let { overrides[it.topicId] ?: it.masteredInDb } ?: false
 
-    private fun progressKey(b: WordBook = book, fm: Boolean = filterMastered) =
-        "progress_${b.id}_${if (fm) "m" else "u"}"
+    private fun progressKey(b: WordBook = book, mode: Int = filterMode) =
+        "progress_${b.id}_$mode"
+
+    // ── “不认识”标记 ──
+    fun markNotRecognized(topicId: Int) {
+        if (topicId in notRecognized) return
+        notRecognized = notRecognized + topicId
+        prefs.saveNotRecognized(notRecognized)
+    }
+
+    fun unmarkNotRecognized(topicId: Int) {
+        if (topicId !in notRecognized) return
+        notRecognized = notRecognized - topicId
+        prefs.saveNotRecognized(notRecognized)
+    }
+
+    fun updateFilterMode(v: Int) { filterMode = v; prefs.putInt("filter_mode", v) }
 
     // ── 朗读 ──
     fun playWord(onComplete: (() -> Unit)? = null) {
@@ -111,19 +151,35 @@ class GuessState(
         }
     }
 
+    // 离开当前词：未查看翻译则从“不认识”移出（列表为会话快照，不会即时塌缩）
+    private fun leaveCurrentWord() {
+        val leaving = currentWord
+        val wasRevealed = revealedThisVisit || revealed
+        revealedThisVisit = false
+        revealed = false
+        if (leaving != null && !wasRevealed) unmarkNotRecognized(leaving.topicId)
+    }
+
     // ── 导航 ──
     fun goPrev() {
         if (currentIndex <= 0) return
-        revealed = false; currentIndex--
+        leaveCurrentWord(); currentIndex--
     }
 
     fun goNext() {
         if (words.isEmpty()) return
-        revealed = false
+        leaveCurrentWord()
         currentIndex = if (currentIndex + 1 >= words.size) 0 else currentIndex + 1
     }
 
-    fun toggleReveal() { revealed = !revealed }
+    fun toggleReveal() {
+        revealed = !revealed
+        // 查看翻译 → 标记“不认识”（同步置位，保证 leaveCurrentWord 能读到）
+        if (revealed) {
+            revealedThisVisit = true
+            currentWord?.let { markNotRecognized(it.topicId) }
+        }
+    }
 
     fun toggleMastered() {
         val w = currentWord ?: return
@@ -134,6 +190,7 @@ class GuessState(
 
     fun updateReadMode(v: Int) { readMode = v; prefs.putInt("read_mode", v) }
     fun updateCrossBookFilter(v: Boolean) { crossBookFilter = v; prefs.putInt("cross_book_filter", if (v) 1 else 0) }
+    fun updateAutoTransparent(v: Boolean) { autoTransparent = v; prefs.putInt("auto_transparent", if (v) 1 else 0) }
 
     // ── 响应式副作用（在后台 scope 启动一次，避免占用 UI 线程）──
     fun start(scope: CoroutineScope) {
@@ -153,10 +210,11 @@ class GuessState(
         }
         // 切词书 → 记住选择（下次启动恢复）
         scope.launch { snapshotFlow { book }.collect { prefs.putInt("selected_book_id", it.id) } }
-        // 切 词书/未斩已斩 → 恢复该组合的浏览进度
+        // 切 词书/过滤视图 → 刷新“不认识”会话快照（让列表稳定，浏览中不塌缩）+ 恢复浏览进度
         scope.launch {
-            snapshotFlow { book to filterMastered }.collect { (b, fm) ->
-                currentIndex = prefs.getInt(progressKey(b, fm), 0).coerceAtLeast(0)
+            snapshotFlow { book to filterMode }.collect { (b, mode) ->
+                nrSnapshot = notRecognized
+                currentIndex = prefs.getInt(progressKey(b, mode), 0).coerceAtLeast(0)
             }
         }
         // 单词集合大小变化 → 夹紧下标

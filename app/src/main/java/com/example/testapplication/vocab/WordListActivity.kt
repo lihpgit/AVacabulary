@@ -130,6 +130,7 @@ fun WordListScreen() {
     val loadState       by repository.loadState.collectAsState()
     val syncState       by repository.syncState.collectAsState()
     val overrides       by repository.overrides.collectAsState()
+    val notRecognized   by repository.notRecognized.collectAsState()
     val readUnmastered  by repository.readTopicIdsUnmastered.collectAsState()
     val readMastered    by repository.readTopicIdsMastered.collectAsState()
     val crossBookCounts    by repository.crossBookCounts.collectAsState()
@@ -143,14 +144,20 @@ fun WordListScreen() {
         mutableStateOf(book)
     }
     LaunchedEffect(selectedBook) { prefs.encode("selected_book_id", selectedBook.id) }
-    var selectedTab    by remember { mutableIntStateOf(0) }
+    // 4 种过滤视图：未斩 / 已斩 / 未斩不认识 / 已斩不认识
+    var filterType by remember {
+        mutableStateOf(prefs.decodeString("filter_type", WordRepository.FILTER_UNMASTERED)
+            ?: WordRepository.FILTER_UNMASTERED)
+    }
+    LaunchedEffect(filterType) { prefs.encode("filter_type", filterType) }
+    var showFilterDialog by remember { mutableStateOf(false) }
     var searchQuery    by remember { mutableStateOf("") }
     var showBookPickDialog by remember { mutableStateOf(false) }
     var editMode           by remember { mutableStateOf(false) }
     var filterEnabled      by remember { mutableStateOf(prefs.decodeBool("cross_book_filter", false)) }
     LaunchedEffect(filterEnabled) { prefs.encode("cross_book_filter", filterEnabled) }
-    // 切换 Tab 或词书时退出编辑模式
-    LaunchedEffect(selectedTab, selectedBook) { editMode = false }
+    // 切换过滤视图或词书时退出编辑模式
+    LaunchedEffect(filterType, selectedBook) { editMode = false }
 
     // 过滤开启时计算全词书去重总数（overrides 变化时也刷新）
     LaunchedEffect(filterEnabled, overrides) {
@@ -173,19 +180,32 @@ fun WordListScreen() {
     }
 
     val allWords = (loadState as? LoadState.Success)?.words ?: emptyList()
-    val unmastered = remember(allWords, overrides, excludedTopicIds) {
-        allWords.filter {
-            !repository.effectiveMastered(it.topicId, it.masteredInDb, overrides) &&
-            it.topicId !in excludedTopicIds
-        }
+    // 跨词书过滤后的基础列表（去重）
+    val visibleWords = remember(allWords, excludedTopicIds) {
+        allWords.filter { it.topicId !in excludedTopicIds }
     }
-    val mastered = remember(allWords, overrides, excludedTopicIds) {
-        allWords.filter {
-            repository.effectiveMastered(it.topicId, it.masteredInDb, overrides) &&
-            it.topicId !in excludedTopicIds
-        }
+    // 各视图列表 + 数量（不认识与斩状态正交）
+    val unmastered = remember(visibleWords, overrides) {
+        visibleWords.filter { repository.matchesFilter(it, WordRepository.FILTER_UNMASTERED, overrides, notRecognized) }
     }
-    val baseList = if (selectedTab == 0) unmastered else mastered
+    val mastered = remember(visibleWords, overrides) {
+        visibleWords.filter { repository.matchesFilter(it, WordRepository.FILTER_MASTERED, overrides, notRecognized) }
+    }
+    val unmasteredUnknown = remember(visibleWords, overrides, notRecognized) {
+        visibleWords.filter { repository.matchesFilter(it, WordRepository.FILTER_UNMASTERED_UNKNOWN, overrides, notRecognized) }
+    }
+    val masteredUnknown = remember(visibleWords, overrides, notRecognized) {
+        visibleWords.filter { repository.matchesFilter(it, WordRepository.FILTER_MASTERED_UNKNOWN, overrides, notRecognized) }
+    }
+    val baseList = when (filterType) {
+        WordRepository.FILTER_MASTERED           -> mastered
+        WordRepository.FILTER_UNMASTERED_UNKNOWN -> unmasteredUnknown
+        WordRepository.FILTER_MASTERED_UNKNOWN   -> masteredUnknown
+        else                                     -> unmastered
+    }
+    // 当前视图是否“未斩系”（决定跨词书颜色 + 已读分桶）
+    val isUnmasteredView = filterType == WordRepository.FILTER_UNMASTERED ||
+        filterType == WordRepository.FILTER_UNMASTERED_UNKNOWN
     val displayList = remember(baseList, searchQuery) {
         if (searchQuery.isBlank()) baseList
         else baseList.filter {
@@ -208,7 +228,7 @@ fun WordListScreen() {
                                 .clickable {
                                     if (selectedBook != book) {
                                         selectedBook = book
-                                        selectedTab  = 0
+                                        filterType   = WordRepository.FILTER_UNMASTERED
                                         searchQuery  = ""
                                     }
                                     showBookPickDialog = false
@@ -220,7 +240,7 @@ fun WordListScreen() {
                                 onClick = {
                                     if (selectedBook != book) {
                                         selectedBook = book
-                                        selectedTab  = 0
+                                        filterType   = WordRepository.FILTER_UNMASTERED
                                         searchQuery  = ""
                                     }
                                     showBookPickDialog = false
@@ -234,6 +254,49 @@ fun WordListScreen() {
             },
             confirmButton = {
                 TextButton(onClick = { showBookPickDialog = false }) { Text("取消") }
+            }
+        )
+    }
+
+    // ── 过滤视图选择对话框（4 选项）──────────────────────────────
+    if (showFilterDialog) {
+        val options = listOf(
+            WordRepository.FILTER_UNMASTERED         to "未斩（${unmastered.size}）",
+            WordRepository.FILTER_MASTERED           to "已斩（${mastered.size}）",
+            WordRepository.FILTER_UNMASTERED_UNKNOWN to "未斩不认识（${unmasteredUnknown.size}）",
+            WordRepository.FILTER_MASTERED_UNKNOWN   to "已斩不认识（${masteredUnknown.size}）",
+        )
+        AlertDialog(
+            onDismissRequest = { showFilterDialog = false },
+            title = { Text("选择列表") },
+            text = {
+                Column {
+                    options.forEach { (value, label) ->
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    if (filterType != value) { filterType = value; searchQuery = "" }
+                                    showFilterDialog = false
+                                }
+                                .padding(vertical = 10.dp)
+                        ) {
+                            RadioButton(
+                                selected = filterType == value,
+                                onClick = {
+                                    if (filterType != value) { filterType = value; searchQuery = "" }
+                                    showFilterDialog = false
+                                }
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text(label)
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showFilterDialog = false }) { Text("取消") }
             }
         )
     }
@@ -263,8 +326,7 @@ fun WordListScreen() {
                     TextButton(onClick = {
                         context.startActivity(
                             Intent(context, ContextGuessActivity::class.java).apply {
-                                putExtra(ContextGuessActivity.EXTRA_FILTER,
-                                    if (selectedTab == 0) "unmastered" else "mastered")
+                                putExtra(ContextGuessActivity.EXTRA_FILTER, filterType)
                                 putExtra(ContextGuessActivity.EXTRA_START_INDEX, 0)
                                 putExtra(ContextGuessActivity.EXTRA_BOOK_ID, selectedBook.id)
                                 putExtra(ContextGuessActivity.EXTRA_CROSS_BOOK_FILTER, filterEnabled)
@@ -323,24 +385,27 @@ fun WordListScreen() {
                     .padding(horizontal = 12.dp, vertical = 2.dp)
             )
 
-            // ── 未斩 / 已斩 Tab + 编辑按钮 ──────────────────────
+            // ── 列表选择（4 选项）+ 编辑按钮 ────────────────────
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                TabRow(
-                    selectedTabIndex = selectedTab,
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Tab(selected = selectedTab == 0, onClick = { selectedTab = 0; searchQuery = "" },
-                        text = { Text("未斩（${unmastered.size}）") })
-                    Tab(selected = selectedTab == 1, onClick = { selectedTab = 1; searchQuery = "" },
-                        text = { Text("已斩（${mastered.size}）") })
+                val filterLabel = when (filterType) {
+                    WordRepository.FILTER_MASTERED           -> "已斩（${mastered.size}）"
+                    WordRepository.FILTER_UNMASTERED_UNKNOWN -> "未斩不认识（${unmasteredUnknown.size}）"
+                    WordRepository.FILTER_MASTERED_UNKNOWN   -> "已斩不认识（${masteredUnknown.size}）"
+                    else                                     -> "未斩（${unmastered.size}）"
                 }
-                TextButton(
-                    onClick = { editMode = !editMode },
-                    modifier = Modifier.padding(horizontal = 4.dp)
-                ) {
+                FilterChip(
+                    selected = true,
+                    onClick  = { showFilterDialog = true },
+                    label    = { Text(filterLabel) },
+                    modifier = Modifier.weight(1f),
+                )
+                TextButton(onClick = { editMode = !editMode }) {
                     Text(if (editMode) "完成" else "编辑")
                 }
             }
@@ -374,8 +439,8 @@ fun WordListScreen() {
                     }
                 }
                 is LoadState.Success -> {
-                    // 当前 tab 对应的已读集合（未斩 / 已斩 分桶）
-                    val readTopicIds = if (selectedTab == 0) readUnmastered else readMastered
+                    // 当前视图对应的已读集合（按未斩/已斩分桶；不认识沿用对应桶）
+                    val readTopicIds = if (isUnmasteredView) readUnmastered else readMastered
                     if (displayList.isEmpty()) {
                         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                             Text(if (searchQuery.isBlank()) "暂无单词" else "未找到匹配单词")
@@ -401,13 +466,13 @@ fun WordListScreen() {
                                 itemsIndexed(displayList) { idx, word ->
                                     val indexInBase = baseList.indexOf(word)
                                     val isRead = readTopicIds.contains(word.topicId)
-                                    val crossBookCount = if (selectedTab == 0)
+                                    val crossBookCount = if (isUnmasteredView)
                                         crossBookCounts[word.topicId] ?: 1 else 1
                                     WordListItem(
                                         word = word, index = idx + 1, isRead = isRead,
                                         crossBookCount = crossBookCount,
                                         editMode = editMode,
-                                        isUnmastered = (selectedTab == 0),
+                                        isUnmastered = isUnmasteredView,
                                         onToggleMastered = {
                                             val currentEffective = repository.effectiveMastered(
                                                 word.topicId, word.masteredInDb, overrides)
@@ -420,8 +485,7 @@ fun WordListScreen() {
                                         onWordClick = {
                                             context.startActivity(
                                                 Intent(context, FlashCardActivity::class.java).apply {
-                                                    putExtra(FlashCardActivity.EXTRA_FILTER,
-                                                        if (selectedTab == 0) "unmastered" else "mastered")
+                                                    putExtra(FlashCardActivity.EXTRA_FILTER, filterType)
                                                     putExtra(FlashCardActivity.EXTRA_START_INDEX,
                                                         indexInBase.coerceAtLeast(0))
                                                     putExtra(FlashCardActivity.EXTRA_BOOK_ID, selectedBook.id)

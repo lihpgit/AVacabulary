@@ -1,6 +1,9 @@
 # TestApplication — 百词斩单词本（项目概述）
 
-Android 单词学习 App，从百词斩 App 的本地数据库读取单词数据，提供单词列表和闪卡两种学习模式。
+从百词斩 App 的本地数据库读取单词数据的单词学习 App。
+- **Android 版**（`app/`）：单词列表、闪卡、语境猜词三种模式。
+- **Mac 桌面版**（`desktop/`，Compose Multiplatform）：语境猜词 + 贴底悬浮条，见文末「Mac 桌面版」。
+- **共享模块**（`core/`）：`Word`、`WordBook`、`ZpakParser`、`ZpkMeta` 等纯 JVM 代码，两端共用。
 
 ---
 
@@ -26,6 +29,7 @@ app/src/main/
 │       ├── WordBook.kt               # 词书枚举（5本）
 │       ├── WordRepository.kt         # 单例，所有数据操作
 │       ├── WordListActivity.kt       # 单词列表页（Compose）
+│       ├── ContextGuessActivity.kt   # 语境猜词页（先看单词+例句猜意思，翻面看释义）
 │       ├── FlashCardActivity.kt      # 闪卡学习页（Compose）
 │       ├── SettingsActivity.kt       # 设置页（同步/重载/刷新/使用说明）
 │       ├── SyncActivity.kt           # 同步进度（导入/导出）
@@ -91,6 +95,7 @@ data class Word(
 | `loadState` | `Idle / Loading / Success(words) / Error` |
 | `syncState` | `Idle / Syncing / Success / Error` |
 | `overrides: Map<Int, Boolean>` | 用户手动切换的已斩状态，覆盖 DB 值，MMKV 持久化 |
+| `notRecognized: Set<Int>` | 「不认识」集合（猜词时查看过翻译的 topicId），与斩/未斩**正交**，MMKV 持久化，跨词书全局唯一 |
 | `readTopicIdsUnmastered/Mastered` | 当前轮次已浏览的 topicId，按未斩/已斩分桶 |
 | `crossBookCounts: Map<Int, Int>` | 每个 topicId 出现在几本词书中（1–5） |
 | `bookTopicIds: Map<WordBook, Set<Int>>` | 各词书的 topicId 集合，用于跨词书过滤 |
@@ -99,16 +104,24 @@ data class Word(
 **关键方法：**
 - `loadWords(book, forceReload)` — 加载词书（有缓存）
 - `effectiveMastered(topicId, dbState, overrides)` — 取实际掌握状态
+- `matchesFilter(word, filterType, overrides, notRecognized)` — **4 种视图统一过滤判定**，三个 Activity 共用
 - `toggleMastered(topicId, currentEffective)` — 切换已斩/未斩并持久化
-- `markRead(topicId, filterType)` / `clearReadMarks(filterType)` — 轮次已读标记
+- `markNotRecognized(topicId)` / `unmarkNotRecognized(topicId)` — 标记/移出「不认识」
+- `markRead(topicId, filterType)` / `clearReadMarks(filterType)` — 轮次已读标记（4 种 filterType 经 `baseFilter` 归并到未斩/已斩两桶）
 - `syncFromAssets()` — 强制从 assets 覆盖 DB 文件（重载词库）
 - `readZpk(topicId)` — 返回 zpk 包的 `Map<String, ByteArray>`
-- `exportProgress()` / `importProgress(json)` — 进度导入导出
+- `exportProgress()` / `importProgress(json)` — 进度导入导出（含 `overrides` + `notRecognized`）
+
+**4 种过滤视图（`FILTER_*` 字符串常量）：**
+`FILTER_UNMASTERED`(未斩) / `FILTER_MASTERED`(已斩) / `FILTER_UNMASTERED_UNKNOWN`(未斩不认识) / `FILTER_MASTERED_UNKNOWN`(已斩不认识)。
+本质 = `斩状态 × 是否不认识` 笛卡儿积；`baseFilter(filterType)` 把 4 种归并回未斩/已斩两类（用于已读分桶 / 跨词书颜色 / round key）。
 
 **MMKV 命名空间：**
 - `word_overrides` — 已斩 override（JSON）
-- `read_marks` — 已读标记，key = `read_topic_ids_{bookId}_{filterType}`
-- `word_list_prefs` — 列表页偏好（选中词书 ID、过滤开关）
+- `word_not_recognized` — 「不认识」集合（JSON 数组）
+- `read_marks` — 已读标记，key = `read_topic_ids_{bookId}_{baseFilter}`
+- `word_list_prefs` — 列表页偏好（选中词书 ID、过滤开关、`filter_type`）
+- `context_guess_prefs` — 猜词偏好（朗读模式、进度 `progress_idx_{bookId}_{filterType}`）
 - `flashcard_prefs` — 闪卡偏好（round 计数，key = `round_{bookId}_{filterType}`）
 
 ---
@@ -128,6 +141,12 @@ WordListActivity 和 FlashCardActivity 都用这同一个模式。
 ### 已斩状态优先级
 `overrides` 覆盖 DB 值：`effectiveMastered = overrides[id] ?: masteredInDb`
 
+### 「不认识」机制（与斩/未斩正交）
+- **标记时机**：在**语境猜词**中查看翻译（翻面）→ `markNotRecognized(topicId)`，立即持久化。
+- **移除时机**：**离开当前词**时（goNext/goPrev），若本次浏览**未翻面** → `unmarkNotRecognized`。判定用 `revealedThisVisit || revealed`（翻面后立刻翻回也算看过）。
+- **会话快照**：猜词/闪卡进入后用 `nrSnapshot`（`remember(bookId, filterType)` 捕获一次）做词表过滤，**本次浏览中列表稳定不塌缩**，增删下次进入才生效。符合「再下次浏览」语义。WordList 的计数则用 live `notRecognized`，返回后实时更新。
+- **正交性**：切换斩状态会让词在「未斩不认识 ↔ 已斩不认识」间自动流动。
+
 ### 已读分桶
 未斩列表和已斩列表的已读标记独立存储，切换 tab 不会互相污染。
 
@@ -140,7 +159,7 @@ WordListActivity 和 FlashCardActivity 都用这同一个模式。
 ## WordListActivity 功能
 
 - **默认词书**：中考（ZHONGKAO）
-- **Tab**：未斩 / 已斩，数量动态显示
+- **列表选择**：单个 FilterChip + 4 选项弹窗（未斩 / 已斩 / 未斩不认识 / 已斩不认识，各带数量），选择存 `filter_type`
 - **编辑模式**：点"编辑"按钮，每条目右侧出现"斩"按钮（未斩=红色 / 已斩=灰色中划线），点击切换掌握状态并朗读单词，切换 tab/词书自动退出编辑模式
 - **单词区（左 1/5）**：点击进入闪卡，从对应索引位置开始
 - **释义区（右 4/5）**：点击显示翻译并朗读（zpk 音频优先，TTS 兜底）
@@ -155,9 +174,20 @@ WordListActivity 和 FlashCardActivity 都用这同一个模式。
 
 ---
 
+## ContextGuessActivity 功能（语境猜词）
+
+- 接收 `EXTRA_FILTER`（4 种 `FILTER_*`）、`EXTRA_START_INDEX`、`EXTRA_BOOK_ID`、`EXTRA_CROSS_BOOK_FILTER`
+- 未翻面：单词 + 音标 + 例句（例句中目标词高亮）；翻面：+ 释义 + 例句翻译，单词作 50% 水印
+- 点击卡片 / 滑动翻面，左右滑或上一个/下一个翻页
+- 翻面 → 标「不认识」；离开未翻面 → 移出（见上「不认识」机制）
+- 左下角可拖动「斩」按钮
+- 平板（`min(w,h) >= 600.dp`）大字布局 + 鼠标滚轮翻页
+
+---
+
 ## FlashCardActivity 功能
 
-- 接收 `EXTRA_FILTER`（unmastered/mastered）、`EXTRA_START_INDEX`、`EXTRA_BOOK_ID`、`EXTRA_CROSS_BOOK_FILTER`
+- 接收 `EXTRA_FILTER`（4 种 `FILTER_*`）、`EXTRA_START_INDEX`、`EXTRA_BOOK_ID`、`EXTRA_CROSS_BOOK_FILTER`
 - 手势：左右滑动翻页，点击切换正/背面
 - 正面：单词 + 音标；背面：中文释义 + 例句 + 例句翻译
 - 长按例句 → 覆盖层大字显示，点击播放例句音频
@@ -194,3 +224,33 @@ WordListActivity 和 FlashCardActivity 都用这同一个模式。
 - 词书缓存：`wordCache: Map<WordBook, List<Word>>`，切换词书时命中缓存无需重读 DB
 - 设备上的 DB 路径：`/data/data/com.example.testapplication/files/baicizhan/`（`filesDir` 下）
 - 百词斩原始 DB 路径：`/sdcard/Android/data/com.jiongji.andriod.card/files/baicizhan/`
+
+---
+
+## Mac 桌面版（`desktop/`）
+
+Compose Multiplatform 桌面版，只做**语境猜词**（无列表/闪卡）。详细使用说明见 `desktop/README.md`。
+
+**启动**：`./gradlew :desktop:run`（须在仓库根目录，读 `app/src/main/assets/baicizhan/`）。打包：`./gradlew :desktop:packageDmg`。
+
+**模块文件：**
+
+| 文件 | 说明 |
+|------|------|
+| `Main.kt` | 两个 `Window`：普通窗口（无边框+真透明，鼠标离开淡为 15% 透明度）/ 贴底悬浮条；`docked` 切换 |
+| `App.kt` | 普通窗口 UI（`GuessTopBar` + 猜词卡片 + 拖动斩按钮）；AWT 拖拽 + 关闭按钮（无系统标题栏） |
+| `DockedBar.kt` | 贴底悬浮条：鼠标进入显示单词/例句，移开全透明；键盘可用 |
+| `GuessState.kt` | **全部状态+逻辑**，普通/贴底窗口共享同一实例；`start(scope)` 用 snapshotFlow 驱动副作用 |
+| `DesktopRepository.kt` | JDBC 读库 + zpk LRU 缓存（`prefetchZpk`/`prewarmIndex`） |
+| `DesktopAudio.kt` | `afplay` 播放 + `afconvert` 解码；每段前拼 250ms 静音防「吞头」 |
+| `DesktopPrefs.kt` | 单 JSON 文件 `mac_data/prefs.json` 持久化 |
+| `SyncJson.kt` | 与 Android `exportProgress/importProgress` 对齐（`overrides` + `notRecognized` 互通） |
+
+**与 Android 的对应：**
+- 过滤视图用 `Int filterMode`（`FILTER_UNMASTERED`..`FILTER_MASTERED_UNKNOWN` = 0..3），顶栏 4 选项下拉。
+- `matches()` / `notRecognized` / `nrSnapshot` / `leaveCurrentWord` / `toggleReveal` 标记逻辑与 Android 语义一致。
+- **性能关键**（勿回退）：响应式副作用全跑后台 `Dispatchers.Default`（不占 EDT）；`excludedState`/`wordsState` 用 `derivedStateOf` 记忆化（否则 filter 内每词重算 `excluded`，3000× 卡顿）。
+
+**注意事项：**
+- `window.opacity` 只在 `undecorated=true` 窗口可用；普通窗口用 `undecorated+transparent` 实现真透明（非蒙层）。
+- 进度 key：`progress_{bookId}_{filterMode}`；过滤选择存 `filter_mode`。

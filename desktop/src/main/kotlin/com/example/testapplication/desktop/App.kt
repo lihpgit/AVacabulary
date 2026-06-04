@@ -10,7 +10,14 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -35,11 +42,40 @@ import kotlinx.coroutines.launch
 import java.awt.FileDialog
 import java.awt.Frame
 import java.io.File
+import java.awt.Point
+import java.awt.event.MouseAdapter
+import java.awt.event.MouseEvent
+import java.awt.event.MouseMotionAdapter
 import kotlin.math.roundToInt
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun App(state: GuessState, onDock: () -> Unit) {
+fun App(
+    state: GuessState,
+    onDock: () -> Unit,
+    onClose: (() -> Unit)? = null,
+    awtWindow: java.awt.Window? = null,
+) {
+    // 无标题栏时：通过 AWT 实现窗口拖拽
+    DisposableEffect(awtWindow) {
+        if (awtWindow == null) return@DisposableEffect onDispose {}
+        var dragStart = Point()
+        val pressListener = object : MouseAdapter() {
+            override fun mousePressed(e: MouseEvent) { dragStart = e.point }
+        }
+        val dragListener = object : MouseMotionAdapter() {
+            override fun mouseDragged(e: MouseEvent) {
+                val loc = awtWindow.location
+                awtWindow.setLocation(loc.x + e.x - dragStart.x, loc.y + e.y - dragStart.y)
+            }
+        }
+        awtWindow.addMouseListener(pressListener)
+        awtWindow.addMouseMotionListener(dragListener)
+        onDispose {
+            awtWindow.removeMouseListener(pressListener)
+            awtWindow.removeMouseMotionListener(dragListener)
+        }
+    }
     MaterialTheme(colorScheme = darkColorScheme()) {
         val scope = rememberCoroutineScope()
 
@@ -63,7 +99,7 @@ fun App(state: GuessState, onDock: () -> Unit) {
         // ── 进度同步（与 Android 互通的 JSON）──
         val snackbar = remember { SnackbarHostState() }
         fun doExport() {
-            val json = SyncJson.export(state.overrides)
+            val json = SyncJson.export(state.overrides, state.notRecognized)
             val dlg = FileDialog(null as Frame?, "导出学习进度", FileDialog.SAVE).apply {
                 file = "vocab_progress.json"; isVisible = true
             }
@@ -81,9 +117,13 @@ fun App(state: GuessState, onDock: () -> Unit) {
             if (dir != null && name != null) {
                 val file = File(dir, name)
                 val result = runCatching {
-                    val map = SyncJson.importOverrides(file.readText(Charsets.UTF_8)).toMutableMap()
+                    val text = file.readText(Charsets.UTF_8)
+                    val map = SyncJson.importOverrides(text).toMutableMap()
                     state.overrides = map
                     state.prefs.saveOverrides(map)
+                    val nr = SyncJson.importNotRecognized(text)
+                    state.notRecognized = nr
+                    state.prefs.saveNotRecognized(nr)
                     map.size
                 }
                 scope.launch {
@@ -125,14 +165,17 @@ fun App(state: GuessState, onDock: () -> Unit) {
                 topBar = {
                     GuessTopBar(
                         book = state.book, onBookChange = { state.book = it; refocus() },
-                        filterMastered = state.filterMastered,
-                        onFilterChange = { state.filterMastered = it; refocus() },
+                        filterMode = state.filterMode,
+                        onFilterModeChange = { state.updateFilterMode(it); refocus() },
                         crossBookFilter = state.crossBookFilter,
                         onCrossBookFilterChange = { state.updateCrossBookFilter(it); refocus() },
                         readMode = state.readMode,
                         onReadModeChange = { state.updateReadMode(it); refocus() },
+                        autoTransparent = state.autoTransparent,
+                        onAutoTransparentChange = { state.updateAutoTransparent(it); refocus() },
                         index = state.currentIndex, total = words.size, elapsed = state.elapsed,
                         onDock = onDock,
+                        onClose = onClose,
                         onExport = { doExport(); refocus() },
                         onImport = { doImport(); refocus() },
                     )
@@ -312,11 +355,13 @@ fun App(state: GuessState, onDock: () -> Unit) {
 @Composable
 private fun GuessTopBar(
     book: WordBook, onBookChange: (WordBook) -> Unit,
-    filterMastered: Boolean, onFilterChange: (Boolean) -> Unit,
+    filterMode: Int, onFilterModeChange: (Int) -> Unit,
     crossBookFilter: Boolean, onCrossBookFilterChange: (Boolean) -> Unit,
     readMode: Int, onReadModeChange: (Int) -> Unit,
+    autoTransparent: Boolean, onAutoTransparentChange: (Boolean) -> Unit,
     index: Int, total: Int, elapsed: Int,
     onDock: () -> Unit,
+    onClose: (() -> Unit)?,
     onExport: () -> Unit, onImport: () -> Unit,
 ) {
     TopAppBar(
@@ -333,9 +378,25 @@ private fun GuessTopBar(
                     }
                 }
             }
-            // 未斩/已斩
-            TextButton(onClick = { onFilterChange(!filterMastered) }) {
-                Text(if (filterMastered) "已斩" else "未斩")
+            // 过滤视图（4 选项）下拉
+            var filterMenu by remember { mutableStateOf(false) }
+            val filterLabel = when (filterMode) {
+                FILTER_MASTERED           -> "已斩"
+                FILTER_UNMASTERED_UNKNOWN -> "未斩不认识"
+                FILTER_MASTERED_UNKNOWN   -> "已斩不认识"
+                else                      -> "未斩"
+            }
+            Box {
+                TextButton(onClick = { filterMenu = true }) { Text(filterLabel) }
+                DropdownMenu(expanded = filterMenu, onDismissRequest = { filterMenu = false }) {
+                    listOf(
+                        FILTER_UNMASTERED to "未斩", FILTER_MASTERED to "已斩",
+                        FILTER_UNMASTERED_UNKNOWN to "未斩不认识", FILTER_MASTERED_UNKNOWN to "已斩不认识",
+                    ).forEach { (v, label) ->
+                        DropdownMenuItem(text = { Text(label) },
+                            onClick = { onFilterModeChange(v); filterMenu = false })
+                    }
+                }
             }
             // 跨词书过滤（去重）
             TextButton(onClick = { onCrossBookFilterChange(!crossBookFilter) }) {
@@ -373,11 +434,25 @@ private fun GuessTopBar(
                         onClick = { syncMenu = false; onImport() })
                 }
             }
+            // 鼠标离开自动透明 开关
+            TextButton(onClick = { onAutoTransparentChange(!autoTransparent) }) {
+                Text(
+                    if (autoTransparent) "透明·开" else "透明·关",
+                    color = if (autoTransparent) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
             // 贴底（迷你悬浮条）
             TextButton(onClick = onDock) { Text("贴底") }
             val m = elapsed / 60; val s = elapsed % 60
             Text("$m:${"%02d".format(s)}", style = MaterialTheme.typography.bodySmall,
-                modifier = Modifier.padding(end = 12.dp))
+                modifier = Modifier.padding(end = 8.dp))
+            // 关闭按钮（无标题栏模式下代替系统红绿灯）
+            if (onClose != null) {
+                TextButton(onClick = onClose) {
+                    Text("✕", color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.Bold)
+                }
+            }
         }
     )
 }

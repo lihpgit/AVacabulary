@@ -138,6 +138,8 @@ fun FlashCardScreen(filterType: String, startIndex: Int, bookId: Int, crossBookF
     val overrides       by repository.overrides.collectAsState()
     val crossBookCounts by repository.crossBookCounts.collectAsState()
     val bookTopicIds    by repository.bookTopicIds.collectAsState()
+    // 会话级“不认识”快照：列表稳定，不在浏览中即时塌缩
+    val nrSnapshot = remember(bookId, filterType) { repository.notRecognized.value }
     val prefs = remember { MMKV.mmkvWithID("flashcard_prefs") }
     val scope = rememberCoroutineScope()
 
@@ -160,19 +162,12 @@ fun FlashCardScreen(filterType: String, startIndex: Int, bookId: Int, crossBookF
     }
 
     val loadStateVal by repository.loadState.collectAsState()
-    val words = remember(loadStateVal, overrides, excludedTopicIds) {
+    val words = remember(loadStateVal, overrides, excludedTopicIds, nrSnapshot) {
         val state = loadStateVal
         if (state is LoadState.Success && repository.currentBook?.id == bookId) {
-            val ov = overrides
-            when (filterType) {
-                "mastered" -> state.words.filter {
-                    repository.effectiveMastered(it.topicId, it.masteredInDb, ov) &&
-                    it.topicId !in excludedTopicIds
-                }
-                else -> state.words.filter {
-                    !repository.effectiveMastered(it.topicId, it.masteredInDb, ov) &&
-                    it.topicId !in excludedTopicIds
-                }
+            state.words.filter {
+                it.topicId !in excludedTopicIds &&
+                    repository.matchesFilter(it, filterType, overrides, nrSnapshot)
             }
         } else emptyList()
     }
@@ -881,7 +876,8 @@ fun FlashCardScreen(filterType: String, startIndex: Int, bookId: Int, crossBookF
 
         val word = currentWord!!
         val effectiveMastered = repository.effectiveMastered(word.topicId, word.masteredInDb, overrides)
-        val wordDisplayColor = if (filterType == "unmastered") {
+        val wordDisplayColor = if (filterType == WordRepository.FILTER_UNMASTERED ||
+            filterType == WordRepository.FILTER_UNMASTERED_UNKNOWN) {
             when (crossBookCounts[word.topicId] ?: 1) {
                 5    -> Color(0xFFFF5252) // 5 本词书都出现 → 亮红
                 4    -> Color(0xFFE040FB) // 出现 4 次 → 亮紫
