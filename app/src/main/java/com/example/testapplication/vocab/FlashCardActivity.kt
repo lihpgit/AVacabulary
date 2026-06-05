@@ -876,8 +876,7 @@ fun FlashCardScreen(filterType: String, startIndex: Int, bookId: Int, crossBookF
 
         val word = currentWord!!
         val effectiveMastered = repository.effectiveMastered(word.topicId, word.masteredInDb, overrides)
-        val wordDisplayColor = if (filterType == WordRepository.FILTER_UNMASTERED ||
-            filterType == WordRepository.FILTER_UNMASTERED_UNKNOWN) {
+        val wordDisplayColor = if (WordRepository.normalizeFilter(filterType) != WordRepository.FILTER_MASTERED) {
             when (crossBookCounts[word.topicId] ?: 1) {
                 5    -> Color(0xFFFF5252) // 5 本词书都出现 → 亮红
                 4    -> Color(0xFFE040FB) // 出现 4 次 → 亮紫

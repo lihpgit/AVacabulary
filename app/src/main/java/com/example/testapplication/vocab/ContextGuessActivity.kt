@@ -166,13 +166,10 @@ fun ContextGuessScreen(
 
     // 是否显示翻译（点击卡片来回切换；切换单词时自动隐藏）
     var revealed by remember { mutableStateOf(false) }
-    // 本词本次浏览是否查看过翻译（决定离开时是否从“不认识”移出）
-    var revealedThisVisit by remember { mutableStateOf(false) }
 
     // 查看翻译 → 标记“不认识”（立即持久化）
     LaunchedEffect(revealed, currentWord?.topicId) {
         if (revealed && currentWord != null) {
-            revealedThisVisit = true
             repository.markNotRecognized(currentWord.topicId)
         }
     }
@@ -287,13 +284,10 @@ fun ContextGuessScreen(
 
     // ── 导航逻辑（纯浏览：上一个/下一个；切词时隐藏翻译并停止朗读）──
 
-    // 离开当前词：未查看翻译则从“不认识”移出（列表为会话快照，不会即时塌缩）
+    // 离开当前词：仅隐藏翻译并停止朗读。
+    // 「不认识」不再随浏览自动移除——只有点「斩」才会移出（移到已斩）。
     fun leaveCurrentWord() {
-        val leaving = currentWord
-        val wasRevealed = revealedThisVisit || revealed
         revealed = false
-        revealedThisVisit = false
-        if (leaving != null && !wasRevealed) repository.unmarkNotRecognized(leaving.topicId)
     }
 
     fun goPrev() {

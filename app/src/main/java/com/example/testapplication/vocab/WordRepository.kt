@@ -34,17 +34,25 @@ class WordRepository private constructor(private val appContext: Context) {
         private const val NOT_RECOGNIZED_PREFS = "word_not_recognized" // MMKV ID
         private const val KEY_NOT_RECOGNIZED  = "not_recognized_json"  // 存 JSON 数组字符串
 
-        // 4 种过滤视图：未斩 / 已斩 / 未斩不认识 / 已斩不认识
-        // “不认识”= 浏览（猜词）时查看过翻译，与斩/未斩正交
+        // 3 种过滤视图（互斥）：未斩 / 已斩 / 不认识
+        // “不认识”= 浏览（猜词）翻面看过翻译；未斩/已斩均排除「不认识」
         const val FILTER_UNMASTERED = "unmastered"
         const val FILTER_MASTERED   = "mastered"
+        const val FILTER_UNKNOWN    = "unknown"
+        // 旧版常量：仅用于兼容已持久化的旧 filter_type（统一归一化为 FILTER_UNKNOWN）
         const val FILTER_UNMASTERED_UNKNOWN = "unmastered_unknown"
         const val FILTER_MASTERED_UNKNOWN   = "mastered_unknown"
 
-        /** 把 4 种过滤类型归并到 2 个已读分桶（不认识沿用对应斩状态的桶） */
+        /** 把旧的「未斩不认识/已斩不认识」归一化到新的「不认识」；其余原样返回 */
+        fun normalizeFilter(filterType: String): String = when (filterType) {
+            FILTER_UNMASTERED_UNKNOWN, FILTER_MASTERED_UNKNOWN, FILTER_UNKNOWN -> FILTER_UNKNOWN
+            FILTER_MASTERED -> FILTER_MASTERED
+            else -> FILTER_UNMASTERED
+        }
+
+        /** 把过滤类型归并到 2 个已读分桶（不认识沿用未斩桶；两者集合不相交，不会污染） */
         private fun baseFilter(filterType: String): String =
-            if (filterType == FILTER_MASTERED || filterType == FILTER_MASTERED_UNKNOWN)
-                FILTER_MASTERED else FILTER_UNMASTERED
+            if (normalizeFilter(filterType) == FILTER_MASTERED) FILTER_MASTERED else FILTER_UNMASTERED
 
         // 已读标记按词书 + 过滤类型隔离：key = "read_topic_ids_{bookId}_{filterType}"
         private fun readMarksKey(book: WordBook, filterType: String) =
@@ -241,7 +249,7 @@ class WordRepository private constructor(private val appContext: Context) {
         saveNotRecognized()
     }
 
-    /** 统一过滤判定：4 种视图共用，避免各 Activity 重复实现 */
+    /** 统一过滤判定：3 种互斥视图共用，避免各 Activity 重复实现 */
     fun matchesFilter(
         word: Word,
         filterType: String,
@@ -249,11 +257,11 @@ class WordRepository private constructor(private val appContext: Context) {
         notRecognized: Set<Int>,
     ): Boolean {
         val mastered = effectiveMastered(word.topicId, word.masteredInDb, overrides)
-        return when (filterType) {
-            FILTER_MASTERED            -> mastered
-            FILTER_UNMASTERED_UNKNOWN  -> !mastered && word.topicId in notRecognized
-            FILTER_MASTERED_UNKNOWN    -> mastered  && word.topicId in notRecognized
-            else                       -> !mastered // FILTER_UNMASTERED
+        val unknown = word.topicId in notRecognized
+        return when (normalizeFilter(filterType)) {
+            FILTER_MASTERED -> mastered && !unknown
+            FILTER_UNKNOWN  -> unknown
+            else            -> !mastered && !unknown // FILTER_UNMASTERED
         }
     }
 
@@ -558,6 +566,11 @@ class WordRepository private constructor(private val appContext: Context) {
         val updated = _overrides.value.toMutableMap().also { it[topicId] = new }
         _overrides.value = updated
         saveOverrides(updated)
+        // 点「斩」即离开「不认识」：同步从 nr 移出（反向取消斩不会重新加回）
+        if (topicId in _notRecognized.value) {
+            _notRecognized.value = _notRecognized.value - topicId
+            saveNotRecognized()
+        }
     }
 
     // ── 进度同步：导出/导入 ─────────────────────────────────────────

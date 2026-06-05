@@ -35,8 +35,8 @@ fun main() = application {
     val bgScope = remember { CoroutineScope(SupervisorJob() + Dispatchers.Default) }
     LaunchedEffect(Unit) { state.start(bgScope) }
 
-    // 普通窗口 / 贴底窗口 切换
-    var docked by remember { mutableStateOf(false) }
+    // 普通窗口 / 贴底窗口 切换；启动默认贴底模式
+    var docked by remember { mutableStateOf(true) }
 
     // ── 普通窗口（无边框 + 真透明 → 鼠标离开可透视桌面）──
     val normalState = rememberWindowState(width = 1100.dp, height = 760.dp)
@@ -62,9 +62,10 @@ fun main() = application {
         }
     }
 
-    // ── 贴底窗口（透明 / 无边框 / 置顶，常驻屏幕底部）──
+    // ── 贴底窗口（透明 / 无边框，常驻屏幕底部）──
+    // 不再 alwaysOnTop：允许其他窗口覆盖，摸鱼时更不显眼；鼠标移入可见区域才抢焦点。
     val screen = remember { Toolkit.getDefaultToolkit().screenSize }
-    val barH = 150
+    val barH = 120
     val dockState = rememberWindowState(
         position = WindowPosition(x = 0.dp, y = (screen.height - barH).dp),
         size = DpSize(screen.width.dp, barH.dp),
@@ -75,7 +76,6 @@ fun main() = application {
         visible = docked,
         undecorated = true,
         transparent = true,
-        alwaysOnTop = true,
         resizable = false,
         state = dockState,
     ) {
@@ -84,7 +84,7 @@ fun main() = application {
             if (docked) { window.toFront(); runCatching { window.requestFocus() } }
         }
         DockedBar(
-            state, active = docked,
+            state, active = docked, awtWindow = window,
             onRestore = { docked = false },
             onClose = ::exitApplication,
         )

@@ -26,12 +26,15 @@ internal const val READ_SENTENCE_ONLY = 1
 internal const val READ_BOTH_WORD_FIRST = 2
 internal const val READ_BOTH_SENTENCE_FIRST = 3
 
-// 4 种过滤视图：未斩 / 已斩 / 未斩不认识 / 已斩不认识
-// “不认识”= 猜词时查看过翻译，与斩/未斩正交
+// 3 种过滤视图（互斥）：未斩 / 已斩 / 不认识
+// “不认识”= 猜词翻面看过翻译；未斩/已斩均排除不认识
 internal const val FILTER_UNMASTERED = 0
 internal const val FILTER_MASTERED = 1
-internal const val FILTER_UNMASTERED_UNKNOWN = 2
-internal const val FILTER_MASTERED_UNKNOWN = 3
+internal const val FILTER_UNKNOWN = 2
+
+/** 旧 filter_mode（2=未斩不认识 / 3=已斩不认识）统一归一化为 2=不认识 */
+internal fun normalizeFilterMode(mode: Int): Int =
+    if (mode >= FILTER_UNKNOWN) FILTER_UNKNOWN else mode
 
 /**
  * 猜词页的全部状态 + 逻辑，独立于任何窗口。
@@ -49,7 +52,7 @@ class GuessState(
         WordBook.entries.firstOrNull { it.id == prefs.getInt("selected_book_id", WordBook.ZHONGKAO.id) }
             ?: WordBook.ZHONGKAO
     )
-    var filterMode by mutableIntStateOf(prefs.getInt("filter_mode", FILTER_UNMASTERED))
+    var filterMode by mutableIntStateOf(normalizeFilterMode(prefs.getInt("filter_mode", FILTER_UNMASTERED)))
     var crossBookFilter by mutableStateOf(prefs.getInt("cross_book_filter", 0) == 1)
     var overrides by mutableStateOf(prefs.loadOverrides())
     var readMode by mutableIntStateOf(prefs.getInt("read_mode", READ_BOTH_WORD_FIRST))
@@ -57,8 +60,6 @@ class GuessState(
     // “不认识”集合（全局 topicId）+ 会话快照（切换视图/词书才刷新，浏览中列表稳定）
     var notRecognized by mutableStateOf(prefs.loadNotRecognized())
     private var nrSnapshot by mutableStateOf(prefs.loadNotRecognized())
-    // 本词本次浏览是否查看过翻译（决定离开时是否从“不认识”移出）
-    private var revealedThisVisit by mutableStateOf(false)
 
     /** 普通窗口：鼠标离开后是否自动变透明（默认开） */
     var autoTransparent by mutableStateOf(prefs.getInt("auto_transparent", 1) == 1)
@@ -88,11 +89,11 @@ class GuessState(
 
     private fun matches(w: Word, mode: Int, nr: Set<Int>): Boolean {
         val mastered = overrides[w.topicId] ?: w.masteredInDb
-        return when (mode) {
-            FILTER_MASTERED           -> mastered
-            FILTER_UNMASTERED_UNKNOWN -> !mastered && w.topicId in nr
-            FILTER_MASTERED_UNKNOWN   -> mastered  && w.topicId in nr
-            else                      -> !mastered // FILTER_UNMASTERED
+        val unknown = w.topicId in nr
+        return when (normalizeFilterMode(mode)) {
+            FILTER_MASTERED -> mastered && !unknown
+            FILTER_UNKNOWN  -> unknown
+            else            -> !mastered && !unknown // FILTER_UNMASTERED
         }
     }
 
@@ -129,6 +130,7 @@ class GuessState(
     // ── 朗读 ──
     fun playWord(onComplete: (() -> Unit)? = null) {
         val bytes = zpkFiles?.let { wordAudioBytesFromZpk(it) }
+        println("[AUD] playWord word=${currentWord?.word} bytes=${bytes?.size ?: -1} hasCb=${onComplete != null}")
         if (bytes != null) audio.play(bytes, "${currentWord?.word} word", onComplete)
         else { audio.stop(); onComplete?.invoke() }
     }
@@ -137,27 +139,34 @@ class GuessState(
         val key = sentences.getOrNull(sentenceIdx)?.audio
             ?: zpkMeta?.sentenceAudio?.takeIf { it.isNotBlank() }
         val bytes = key?.let { zpkFiles?.get(it) }
+        println("[AUD] playSentence word=${currentWord?.word} key=$key bytes=${bytes?.size ?: -1} sIdx=$sentenceIdx sCount=${sentences.size} zpkKeys=${zpkFiles?.keys} hasCb=${onComplete != null}")
         if (bytes != null) audio.play(bytes, "${currentWord?.word} sent", onComplete)
         else { audio.stop(); onComplete?.invoke() }
     }
 
     fun autoPlay() {
         val tid = currentWord?.topicId ?: return
+        println("[AUD] autoPlay mode=$readMode tid=$tid word=${currentWord?.word}")
         when (readMode) {
             READ_WORD_ONLY -> playWord()
             READ_SENTENCE_ONLY -> playSentence()
-            READ_BOTH_SENTENCE_FIRST -> playSentence { if (currentWord?.topicId == tid) playWord() }
-            else -> playWord { if (currentWord?.topicId == tid) playSentence() }
+            READ_BOTH_SENTENCE_FIRST -> playSentence {
+                val ok = currentWord?.topicId == tid
+                println("[AUD] sent-done -> chain word? match=$ok (cur=${currentWord?.topicId} tid=$tid)")
+                if (ok) playWord()
+            }
+            else -> playWord {
+                val ok = currentWord?.topicId == tid
+                println("[AUD] word-done -> chain sent? match=$ok (cur=${currentWord?.topicId} tid=$tid)")
+                if (ok) playSentence()
+            }
         }
     }
 
-    // 离开当前词：未查看翻译则从“不认识”移出（列表为会话快照，不会即时塌缩）
+    // 离开当前词：仅隐藏翻译。
+    // 「不认识」不再随浏览自动移除——只有点「斩」才会移出（移到已斩）。
     private fun leaveCurrentWord() {
-        val leaving = currentWord
-        val wasRevealed = revealedThisVisit || revealed
-        revealedThisVisit = false
         revealed = false
-        if (leaving != null && !wasRevealed) unmarkNotRecognized(leaving.topicId)
     }
 
     // ── 导航 ──
@@ -174,9 +183,8 @@ class GuessState(
 
     fun toggleReveal() {
         revealed = !revealed
-        // 查看翻译 → 标记“不认识”（同步置位，保证 leaveCurrentWord 能读到）
+        // 查看翻译 → 标记“不认识”
         if (revealed) {
-            revealedThisVisit = true
             currentWord?.let { markNotRecognized(it.topicId) }
         }
     }
@@ -186,6 +194,11 @@ class GuessState(
         val eff = overrides[w.topicId] ?: w.masteredInDb
         overrides = overrides.toMutableMap().also { it[w.topicId] = !eff }
         prefs.saveOverrides(overrides)
+        // 点「斩」即离开「不认识」：同步从 nr 移出（反向取消斩不会重新加回）
+        if (w.topicId in notRecognized) {
+            notRecognized = notRecognized - w.topicId
+            prefs.saveNotRecognized(notRecognized)
+        }
     }
 
     fun updateReadMode(v: Int) { readMode = v; prefs.putInt("read_mode", v) }

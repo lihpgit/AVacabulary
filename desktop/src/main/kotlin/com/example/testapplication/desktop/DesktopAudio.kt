@@ -43,8 +43,12 @@ class DesktopAudio {
     fun play(bytes: ByteArray, label: String = "", onComplete: (() -> Unit)? = null) {
         val myGen = gen.incrementAndGet()
         killProc()
+        println("[AUD] play START label=$label myGen=$myGen size=${bytes.size}")
         exec.submit {
-            if (gen.get() != myGen) return@submit
+            if (gen.get() != myGen) {
+                println("[AUD] play SKIP-pre label=$label myGen=$myGen gen=${gen.get()}")
+                return@submit
+            }
             val temps = mutableListOf<File>()
             try {
                 val ext = extOf(bytes)
@@ -52,20 +56,29 @@ class DesktopAudio {
                 temps += clip
 
                 // 解码 + 前置静音；失败则回退原始 clip。
-                val padded = runCatching { buildSilencePadded(clip) }.getOrNull()
+                val padded = runCatching { buildSilencePadded(clip) }
+                    .onFailure { println("[AUD] pad FAIL label=$label err=${it.message}") }
+                    .getOrNull()
                 padded?.let { temps += it }
                 val target = padded ?: clip
-                if (gen.get() != myGen) return@submit
+                if (gen.get() != myGen) {
+                    println("[AUD] play SKIP-mid label=$label myGen=$myGen gen=${gen.get()}")
+                    return@submit
+                }
 
                 val p = ProcessBuilder("/usr/bin/afplay", target.absolutePath)
                     .redirectErrorStream(true)
                     .start()
                 proc = p
-                p.waitFor()
-            } catch (_: Exception) {
+                val exit = p.waitFor()
+                println("[AUD] play afplay-exit label=$label myGen=$myGen exit=$exit")
+            } catch (e: Exception) {
+                println("[AUD] play EXC label=$label err=${e.message}")
             } finally {
                 temps.forEach { runCatching { it.delete() } }
-                if (gen.get() == myGen) onComplete?.invoke()
+                val match = gen.get() == myGen
+                println("[AUD] play DONE label=$label myGen=$myGen gen=${gen.get()} invokeCb=$match hasCb=${onComplete != null}")
+                if (match) onComplete?.invoke()
             }
         }
     }

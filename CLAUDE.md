@@ -95,7 +95,7 @@ data class Word(
 | `loadState` | `Idle / Loading / Success(words) / Error` |
 | `syncState` | `Idle / Syncing / Success / Error` |
 | `overrides: Map<Int, Boolean>` | 用户手动切换的已斩状态，覆盖 DB 值，MMKV 持久化 |
-| `notRecognized: Set<Int>` | 「不认识」集合（猜词时查看过翻译的 topicId），与斩/未斩**正交**，MMKV 持久化，跨词书全局唯一 |
+| `notRecognized: Set<Int>` | 「不认识」集合（猜词翻面看过翻译的 topicId），是**独立第三类视图**，与未斩/已斩**互斥**，MMKV 持久化，跨词书全局唯一 |
 | `readTopicIdsUnmastered/Mastered` | 当前轮次已浏览的 topicId，按未斩/已斩分桶 |
 | `crossBookCounts: Map<Int, Int>` | 每个 topicId 出现在几本词书中（1–5） |
 | `bookTopicIds: Map<WordBook, Set<Int>>` | 各词书的 topicId 集合，用于跨词书过滤 |
@@ -104,17 +104,20 @@ data class Word(
 **关键方法：**
 - `loadWords(book, forceReload)` — 加载词书（有缓存）
 - `effectiveMastered(topicId, dbState, overrides)` — 取实际掌握状态
-- `matchesFilter(word, filterType, overrides, notRecognized)` — **4 种视图统一过滤判定**，三个 Activity 共用
-- `toggleMastered(topicId, currentEffective)` — 切换已斩/未斩并持久化
-- `markNotRecognized(topicId)` / `unmarkNotRecognized(topicId)` — 标记/移出「不认识」
-- `markRead(topicId, filterType)` / `clearReadMarks(filterType)` — 轮次已读标记（4 种 filterType 经 `baseFilter` 归并到未斩/已斩两桶）
+- `matchesFilter(word, filterType, overrides, notRecognized)` — **3 种互斥视图统一过滤判定**，三个 Activity 共用（内部经 `normalizeFilter` 兼容旧值）
+- `normalizeFilter(filterType)` — 把旧的「未斩不认识/已斩不认识」归一化为 `FILTER_UNKNOWN`
+- `toggleMastered(topicId, currentEffective)` — 切换已斩/未斩并持久化，**同时把该词从「不认识」移出**
+- `markNotRecognized(topicId)` — 翻面标记「不认识」（`unmarkNotRecognized` 仍保留但已不在浏览流程调用）
+- `markRead(topicId, filterType)` / `clearReadMarks(filterType)` — 轮次已读标记（filterType 经 `baseFilter` 归并到未斩/已斩两桶，「不认识」归入未斩桶）
 - `syncFromAssets()` — 强制从 assets 覆盖 DB 文件（重载词库）
 - `readZpk(topicId)` — 返回 zpk 包的 `Map<String, ByteArray>`
 - `exportProgress()` / `importProgress(json)` — 进度导入导出（含 `overrides` + `notRecognized`）
 
-**4 种过滤视图（`FILTER_*` 字符串常量）：**
-`FILTER_UNMASTERED`(未斩) / `FILTER_MASTERED`(已斩) / `FILTER_UNMASTERED_UNKNOWN`(未斩不认识) / `FILTER_MASTERED_UNKNOWN`(已斩不认识)。
-本质 = `斩状态 × 是否不认识` 笛卡儿积；`baseFilter(filterType)` 把 4 种归并回未斩/已斩两类（用于已读分桶 / 跨词书颜色 / round key）。
+**3 种互斥过滤视图（`FILTER_*` 字符串常量）：**
+`FILTER_UNMASTERED`(未斩) / `FILTER_MASTERED`(已斩) / `FILTER_UNKNOWN`(不认识)。
+判定互斥：`未斩 = !mastered && !nr`／`已斩 = mastered && !nr`／`不认识 = nr`（nr 优先）。
+旧常量 `FILTER_UNMASTERED_UNKNOWN`/`FILTER_MASTERED_UNKNOWN` 仅保留用于 `normalizeFilter` 兼容旧持久化值。
+`baseFilter(filterType)` 把视图归并回未斩/已斩两类（用于已读分桶 / 跨词书颜色 / round key），「不认识」归入未斩类。
 
 **MMKV 命名空间：**
 - `word_overrides` — 已斩 override（JSON）
@@ -141,11 +144,11 @@ WordListActivity 和 FlashCardActivity 都用这同一个模式。
 ### 已斩状态优先级
 `overrides` 覆盖 DB 值：`effectiveMastered = overrides[id] ?: masteredInDb`
 
-### 「不认识」机制（与斩/未斩正交）
+### 「不认识」机制（独立第三类，与未斩/已斩互斥）
 - **标记时机**：在**语境猜词**中查看翻译（翻面）→ `markNotRecognized(topicId)`，立即持久化。
-- **移除时机**：**离开当前词**时（goNext/goPrev），若本次浏览**未翻面** → `unmarkNotRecognized`。判定用 `revealedThisVisit || revealed`（翻面后立刻翻回也算看过）。
-- **会话快照**：猜词/闪卡进入后用 `nrSnapshot`（`remember(bookId, filterType)` 捕获一次）做词表过滤，**本次浏览中列表稳定不塌缩**，增删下次进入才生效。符合「再下次浏览」语义。WordList 的计数则用 live `notRecognized`，返回后实时更新。
-- **正交性**：切换斩状态会让词在「未斩不认识 ↔ 已斩不认识」间自动流动。
+- **移除时机**：**只有点「斩」**（`toggleMastered`）才把词从「不认识」移出并移到「已斩」。浏览（goNext/goPrev）**不再**自动增删 nr。反向取消斩不会重新加回。
+- **会话快照**：猜词/闪卡进入后用 `nrSnapshot`（`remember(bookId, filterType)` 捕获一次）做词表过滤，**本次浏览中列表稳定不塌缩**，增删下次进入才生效。WordList 的计数则用 live `notRecognized`，返回后实时更新。
+- **互斥性**：nr 优先——在 nr 中的词只出现在「不认识」，不出现在未斩/已斩。点斩 → 离开「不认识」进入「已斩」。
 
 ### 已读分桶
 未斩列表和已斩列表的已读标记独立存储，切换 tab 不会互相污染。
@@ -159,7 +162,7 @@ WordListActivity 和 FlashCardActivity 都用这同一个模式。
 ## WordListActivity 功能
 
 - **默认词书**：中考（ZHONGKAO）
-- **列表选择**：单个 FilterChip + 4 选项弹窗（未斩 / 已斩 / 未斩不认识 / 已斩不认识，各带数量），选择存 `filter_type`
+- **列表选择**：单个 FilterChip + 3 选项弹窗（未斩 / 已斩 / 不认识，各带数量），选择存 `filter_type`（旧值进入时 `normalizeFilter` 归一化）
 - **编辑模式**：点"编辑"按钮，每条目右侧出现"斩"按钮（未斩=红色 / 已斩=灰色中划线），点击切换掌握状态并朗读单词，切换 tab/词书自动退出编辑模式
 - **单词区（左 1/5）**：点击进入闪卡，从对应索引位置开始
 - **释义区（右 4/5）**：点击显示翻译并朗读（zpk 音频优先，TTS 兜底）
@@ -176,10 +179,10 @@ WordListActivity 和 FlashCardActivity 都用这同一个模式。
 
 ## ContextGuessActivity 功能（语境猜词）
 
-- 接收 `EXTRA_FILTER`（4 种 `FILTER_*`）、`EXTRA_START_INDEX`、`EXTRA_BOOK_ID`、`EXTRA_CROSS_BOOK_FILTER`
+- 接收 `EXTRA_FILTER`（3 种 `FILTER_*`）、`EXTRA_START_INDEX`、`EXTRA_BOOK_ID`、`EXTRA_CROSS_BOOK_FILTER`
 - 未翻面：单词 + 音标 + 例句（例句中目标词高亮）；翻面：+ 释义 + 例句翻译，单词作 50% 水印
 - 点击卡片 / 滑动翻面，左右滑或上一个/下一个翻页
-- 翻面 → 标「不认识」；离开未翻面 → 移出（见上「不认识」机制）
+- 翻面 → 标「不认识」；浏览不再自动移出，只有点「斩」才离开「不认识」（见上「不认识」机制）
 - 左下角可拖动「斩」按钮
 - 平板（`min(w,h) >= 600.dp`）大字布局 + 鼠标滚轮翻页
 
@@ -187,7 +190,7 @@ WordListActivity 和 FlashCardActivity 都用这同一个模式。
 
 ## FlashCardActivity 功能
 
-- 接收 `EXTRA_FILTER`（4 种 `FILTER_*`）、`EXTRA_START_INDEX`、`EXTRA_BOOK_ID`、`EXTRA_CROSS_BOOK_FILTER`
+- 接收 `EXTRA_FILTER`（3 种 `FILTER_*`）、`EXTRA_START_INDEX`、`EXTRA_BOOK_ID`、`EXTRA_CROSS_BOOK_FILTER`
 - 手势：左右滑动翻页，点击切换正/背面
 - 正面：单词 + 音标；背面：中文释义 + 例句 + 例句翻译
 - 长按例句 → 覆盖层大字显示，点击播放例句音频
@@ -237,9 +240,9 @@ Compose Multiplatform 桌面版，只做**语境猜词**（无列表/闪卡）�
 
 | 文件 | 说明 |
 |------|------|
-| `Main.kt` | 两个 `Window`：普通窗口（无边框+真透明，鼠标离开淡为 15% 透明度）/ 贴底悬浮条；`docked` 切换 |
+| `Main.kt` | 两个 `Window`：普通窗口（无边框+真透明，鼠标离开淡为 15% 透明度）/ 贴底悬浮条；`docked` 切换，**启动默认贴底**（`docked=true`）；贴底窗口**不置顶**（可被覆盖），固定高 `barH=120` |
 | `App.kt` | 普通窗口 UI（`GuessTopBar` + 猜词卡片 + 拖动斩按钮）；AWT 拖拽 + 关闭按钮（无系统标题栏） |
-| `DockedBar.kt` | 贴底悬浮条：鼠标进入显示单词/例句，移开全透明；键盘可用 |
+| `DockedBar.kt` | 贴底悬浮条（摸鱼形态）：半透明黑底 0.4 + 白字 0.6、高度随内容、可 AWT 拖动；鼠标移入显示并抢焦点、移开隐藏；仅留「斩」键 + `❐` 恢复窗口，Esc 也恢复；兜底轮询鼠标坐标防 `Exit` 漏报卡显示；键盘 ← →/空格/P/↓ |
 | `GuessState.kt` | **全部状态+逻辑**，普通/贴底窗口共享同一实例；`start(scope)` 用 snapshotFlow 驱动副作用 |
 | `DesktopRepository.kt` | JDBC 读库 + zpk LRU 缓存（`prefetchZpk`/`prewarmIndex`） |
 | `DesktopAudio.kt` | `afplay` 播放 + `afconvert` 解码；每段前拼 250ms 静音防「吞头」 |
@@ -247,8 +250,8 @@ Compose Multiplatform 桌面版，只做**语境猜词**（无列表/闪卡）�
 | `SyncJson.kt` | 与 Android `exportProgress/importProgress` 对齐（`overrides` + `notRecognized` 互通） |
 
 **与 Android 的对应：**
-- 过滤视图用 `Int filterMode`（`FILTER_UNMASTERED`..`FILTER_MASTERED_UNKNOWN` = 0..3），顶栏 4 选项下拉。
-- `matches()` / `notRecognized` / `nrSnapshot` / `leaveCurrentWord` / `toggleReveal` 标记逻辑与 Android 语义一致。
+- 过滤视图用 `Int filterMode`（`FILTER_UNMASTERED`/`FILTER_MASTERED`/`FILTER_UNKNOWN` = 0/1/2），顶栏 3 选项下拉；旧 `filter_mode=3` 经 `normalizeFilterMode` 归一化为 2。
+- `matches()`（三类互斥）/ `notRecognized` / `nrSnapshot` / `leaveCurrentWord`（不再自动移除 nr）/ `toggleReveal`（翻面标记）/ `toggleMastered`（点斩移出 nr）逻辑与 Android 语义一致。
 - **性能关键**（勿回退）：响应式副作用全跑后台 `Dispatchers.Default`（不占 EDT）；`excludedState`/`wordsState` 用 `derivedStateOf` 记忆化（否则 filter 内每词重算 `excluded`，3000× 卡顿）。
 
 **注意事项：**

@@ -144,10 +144,11 @@ fun WordListScreen() {
         mutableStateOf(book)
     }
     LaunchedEffect(selectedBook) { prefs.encode("selected_book_id", selectedBook.id) }
-    // 4 种过滤视图：未斩 / 已斩 / 未斩不认识 / 已斩不认识
+    // 3 种过滤视图（互斥）：未斩 / 已斩 / 不认识。旧 filter_type 自动归一化
     var filterType by remember {
-        mutableStateOf(prefs.decodeString("filter_type", WordRepository.FILTER_UNMASTERED)
-            ?: WordRepository.FILTER_UNMASTERED)
+        mutableStateOf(WordRepository.normalizeFilter(
+            prefs.decodeString("filter_type", WordRepository.FILTER_UNMASTERED)
+                ?: WordRepository.FILTER_UNMASTERED))
     }
     LaunchedEffect(filterType) { prefs.encode("filter_type", filterType) }
     var showFilterDialog by remember { mutableStateOf(false) }
@@ -184,28 +185,23 @@ fun WordListScreen() {
     val visibleWords = remember(allWords, excludedTopicIds) {
         allWords.filter { it.topicId !in excludedTopicIds }
     }
-    // 各视图列表 + 数量（不认识与斩状态正交）
-    val unmastered = remember(visibleWords, overrides) {
+    // 3 个互斥视图列表 + 数量：未斩 / 已斩 / 不认识
+    val unmastered = remember(visibleWords, overrides, notRecognized) {
         visibleWords.filter { repository.matchesFilter(it, WordRepository.FILTER_UNMASTERED, overrides, notRecognized) }
     }
-    val mastered = remember(visibleWords, overrides) {
+    val mastered = remember(visibleWords, overrides, notRecognized) {
         visibleWords.filter { repository.matchesFilter(it, WordRepository.FILTER_MASTERED, overrides, notRecognized) }
     }
-    val unmasteredUnknown = remember(visibleWords, overrides, notRecognized) {
-        visibleWords.filter { repository.matchesFilter(it, WordRepository.FILTER_UNMASTERED_UNKNOWN, overrides, notRecognized) }
+    val unknown = remember(visibleWords, overrides, notRecognized) {
+        visibleWords.filter { repository.matchesFilter(it, WordRepository.FILTER_UNKNOWN, overrides, notRecognized) }
     }
-    val masteredUnknown = remember(visibleWords, overrides, notRecognized) {
-        visibleWords.filter { repository.matchesFilter(it, WordRepository.FILTER_MASTERED_UNKNOWN, overrides, notRecognized) }
+    val baseList = when (WordRepository.normalizeFilter(filterType)) {
+        WordRepository.FILTER_MASTERED -> mastered
+        WordRepository.FILTER_UNKNOWN  -> unknown
+        else                           -> unmastered
     }
-    val baseList = when (filterType) {
-        WordRepository.FILTER_MASTERED           -> mastered
-        WordRepository.FILTER_UNMASTERED_UNKNOWN -> unmasteredUnknown
-        WordRepository.FILTER_MASTERED_UNKNOWN   -> masteredUnknown
-        else                                     -> unmastered
-    }
-    // 当前视图是否“未斩系”（决定跨词书颜色 + 已读分桶）
-    val isUnmasteredView = filterType == WordRepository.FILTER_UNMASTERED ||
-        filterType == WordRepository.FILTER_UNMASTERED_UNKNOWN
+    // 当前视图是否“未斩系”（决定跨词书颜色 + 已读分桶）：未斩 + 不认识 都算
+    val isUnmasteredView = WordRepository.normalizeFilter(filterType) != WordRepository.FILTER_MASTERED
     val displayList = remember(baseList, searchQuery) {
         if (searchQuery.isBlank()) baseList
         else baseList.filter {
@@ -261,10 +257,9 @@ fun WordListScreen() {
     // ── 过滤视图选择对话框（4 选项）──────────────────────────────
     if (showFilterDialog) {
         val options = listOf(
-            WordRepository.FILTER_UNMASTERED         to "未斩（${unmastered.size}）",
-            WordRepository.FILTER_MASTERED           to "已斩（${mastered.size}）",
-            WordRepository.FILTER_UNMASTERED_UNKNOWN to "未斩不认识（${unmasteredUnknown.size}）",
-            WordRepository.FILTER_MASTERED_UNKNOWN   to "已斩不认识（${masteredUnknown.size}）",
+            WordRepository.FILTER_UNMASTERED to "未斩（${unmastered.size}）",
+            WordRepository.FILTER_MASTERED   to "已斩（${mastered.size}）",
+            WordRepository.FILTER_UNKNOWN    to "不认识（${unknown.size}）",
         )
         AlertDialog(
             onDismissRequest = { showFilterDialog = false },
@@ -393,11 +388,10 @@ fun WordListScreen() {
                     .padding(horizontal = 12.dp, vertical = 4.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                val filterLabel = when (filterType) {
-                    WordRepository.FILTER_MASTERED           -> "已斩（${mastered.size}）"
-                    WordRepository.FILTER_UNMASTERED_UNKNOWN -> "未斩不认识（${unmasteredUnknown.size}）"
-                    WordRepository.FILTER_MASTERED_UNKNOWN   -> "已斩不认识（${masteredUnknown.size}）"
-                    else                                     -> "未斩（${unmastered.size}）"
+                val filterLabel = when (WordRepository.normalizeFilter(filterType)) {
+                    WordRepository.FILTER_MASTERED -> "已斩（${mastered.size}）"
+                    WordRepository.FILTER_UNKNOWN  -> "不认识（${unknown.size}）"
+                    else                           -> "未斩（${unmastered.size}）"
                 }
                 FilterChip(
                     selected = true,

@@ -380,18 +380,17 @@ private fun GuessTopBar(
             }
             // 过滤视图（4 选项）下拉
             var filterMenu by remember { mutableStateOf(false) }
-            val filterLabel = when (filterMode) {
-                FILTER_MASTERED           -> "已斩"
-                FILTER_UNMASTERED_UNKNOWN -> "未斩不认识"
-                FILTER_MASTERED_UNKNOWN   -> "已斩不认识"
-                else                      -> "未斩"
+            val filterLabel = when (normalizeFilterMode(filterMode)) {
+                FILTER_MASTERED -> "已斩"
+                FILTER_UNKNOWN  -> "不认识"
+                else            -> "未斩"
             }
             Box {
                 TextButton(onClick = { filterMenu = true }) { Text(filterLabel) }
                 DropdownMenu(expanded = filterMenu, onDismissRequest = { filterMenu = false }) {
                     listOf(
                         FILTER_UNMASTERED to "未斩", FILTER_MASTERED to "已斩",
-                        FILTER_UNMASTERED_UNKNOWN to "未斩不认识", FILTER_MASTERED_UNKNOWN to "已斩不认识",
+                        FILTER_UNKNOWN to "不认识",
                     ).forEach { (v, label) ->
                         DropdownMenuItem(text = { Text(label) },
                             onClick = { onFilterModeChange(v); filterMenu = false })
