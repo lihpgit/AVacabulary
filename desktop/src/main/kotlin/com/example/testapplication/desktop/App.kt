@@ -39,8 +39,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.testapplication.vocab.WordBook
 import kotlinx.coroutines.launch
+import java.awt.Cursor
 import java.awt.FileDialog
 import java.awt.Frame
+import java.awt.Rectangle
 import java.io.File
 import java.awt.Point
 import java.awt.event.MouseAdapter
@@ -53,27 +55,90 @@ import kotlin.math.roundToInt
 fun App(
     state: GuessState,
     onDock: () -> Unit,
+    onMinimize: (() -> Unit)? = null,
+    onMaximize: (() -> Unit)? = null,
     onClose: (() -> Unit)? = null,
     awtWindow: java.awt.Window? = null,
 ) {
-    // 无标题栏时：通过 AWT 实现窗口拖拽
+    // 无标题栏（真透明）窗口没有原生边框，故通过 AWT 监听器自实现「拖拽移动 + 边缘/四角缩放」。
     DisposableEffect(awtWindow) {
         if (awtWindow == null) return@DisposableEffect onDispose {}
-        var dragStart = Point()
-        val pressListener = object : MouseAdapter() {
-            override fun mousePressed(e: MouseEvent) { dragStart = e.point }
+
+        // 边缘缩放热区宽度 / 最小窗口尺寸（单位与 AWT bounds 一致，macOS 上即逻辑点）
+        val margin = 8
+        val minW = 480
+        val minH = 360
+        // 命中边的位掩码：左1 右2 上4 下8；0 = 内部（移动）
+        val left = 1; val right = 2; val top = 4; val bottom = 8
+        fun zoneAt(x: Int, y: Int, w: Int, h: Int): Int {
+            var z = 0
+            if (x <= margin) z = z or left
+            if (x >= w - margin) z = z or right
+            if (y <= margin) z = z or top
+            if (y >= h - margin) z = z or bottom
+            return z
         }
-        val dragListener = object : MouseMotionAdapter() {
+
+        var zone = 0
+        var startScreen = Point()        // 按下时鼠标屏幕坐标
+        var startBounds = Rectangle()    // 按下时窗口 bounds（作为拖动锚点，避免抖动）
+        var lastCursorType = -1          // 上次设置的光标类型，避免每次移动都改（少与 Compose 内部光标抢）
+
+        val pressListener = object : MouseAdapter() {
+            override fun mousePressed(e: MouseEvent) {
+                zone = zoneAt(e.x, e.y, awtWindow.width, awtWindow.height)
+                startScreen = Point(e.xOnScreen, e.yOnScreen)
+                startBounds = awtWindow.bounds
+            }
+            override fun mouseExited(e: MouseEvent) {
+                lastCursorType = -1
+                awtWindow.cursor = Cursor.getDefaultCursor()
+            }
+        }
+        val motionListener = object : MouseMotionAdapter() {
+            override fun mouseMoved(e: MouseEvent) {
+                // 悬停时按所在热区切换缩放光标，内部恢复默认（仅在类型变化时设置，少与 Compose 内部光标抢）
+                val type = when (zoneAt(e.x, e.y, awtWindow.width, awtWindow.height)) {
+                    left -> Cursor.W_RESIZE_CURSOR
+                    right -> Cursor.E_RESIZE_CURSOR
+                    top -> Cursor.N_RESIZE_CURSOR
+                    bottom -> Cursor.S_RESIZE_CURSOR
+                    top or left -> Cursor.NW_RESIZE_CURSOR
+                    top or right -> Cursor.NE_RESIZE_CURSOR
+                    bottom or left -> Cursor.SW_RESIZE_CURSOR
+                    bottom or right -> Cursor.SE_RESIZE_CURSOR
+                    else -> Cursor.DEFAULT_CURSOR
+                }
+                if (type != lastCursorType) {
+                    lastCursorType = type
+                    awtWindow.cursor = Cursor.getPredefinedCursor(type)
+                }
+            }
             override fun mouseDragged(e: MouseEvent) {
-                val loc = awtWindow.location
-                awtWindow.setLocation(loc.x + e.x - dragStart.x, loc.y + e.y - dragStart.y)
+                val dx = e.xOnScreen - startScreen.x
+                val dy = e.yOnScreen - startScreen.y
+                if (zone == 0) {
+                    // 内部：整窗移动
+                    awtWindow.setLocation(startBounds.x + dx, startBounds.y + dy)
+                    return
+                }
+                // 边缘/四角：把命中的边按位移拉伸，最小尺寸时锁住对边
+                var x = startBounds.x; var y = startBounds.y
+                var w = startBounds.width; var h = startBounds.height
+                if (zone and right != 0) w = startBounds.width + dx
+                if (zone and bottom != 0) h = startBounds.height + dy
+                if (zone and left != 0) { x = startBounds.x + dx; w = startBounds.width - dx }
+                if (zone and top != 0) { y = startBounds.y + dy; h = startBounds.height - dy }
+                if (w < minW) { if (zone and left != 0) x -= (minW - w); w = minW }
+                if (h < minH) { if (zone and top != 0) y -= (minH - h); h = minH }
+                awtWindow.setBounds(x, y, w, h)
             }
         }
         awtWindow.addMouseListener(pressListener)
-        awtWindow.addMouseMotionListener(dragListener)
+        awtWindow.addMouseMotionListener(motionListener)
         onDispose {
             awtWindow.removeMouseListener(pressListener)
-            awtWindow.removeMouseMotionListener(dragListener)
+            awtWindow.removeMouseMotionListener(motionListener)
         }
     }
     MaterialTheme(colorScheme = darkColorScheme()) {
@@ -96,8 +161,16 @@ fun App(
                 state.zpkFiles?.containsKey(state.zpkMeta?.sentenceAudio) == true)
         val effectiveMastered = state.effectiveMastered
 
+        // 朗读设置弹窗开关
+        var showReadSettings by remember { mutableStateOf(false) }
+
         // ── 进度同步（与 Android 互通的 JSON）──
         val snackbar = remember { SnackbarHostState() }
+
+        // 朗读被拦截（未连蓝牙）时的提示，用 tick 触发以便重复弹出
+        LaunchedEffect(state.audioHintTick) {
+            if (state.audioHintTick > 0) state.audioHint?.let { snackbar.showSnackbar(it) }
+        }
         fun doExport() {
             val json = SyncJson.export(state.overrides, state.notRecognized)
             val dlg = FileDialog(null as Frame?, "导出学习进度", FileDialog.SAVE).apply {
@@ -142,6 +215,86 @@ fun App(
         LaunchedEffect(Unit) { focus.requestFocus() }
         fun refocus() { runCatching { focus.requestFocus() } }
 
+        // ── 朗读设置弹窗：朗读方式 + 遍数 + 自动朗读时显示翻译 ──
+        if (showReadSettings) {
+            AlertDialog(
+                onDismissRequest = { showReadSettings = false; refocus() },
+                title = { Text("朗读设置") },
+                text = {
+                    Column {
+                        Text("朗读方式", fontWeight = FontWeight.Medium)
+                        listOf(
+                            READ_WORD_ONLY to "只读单词",
+                            READ_SENTENCE_ONLY to "只读例句",
+                            READ_BOTH_WORD_FIRST to "都读·先单词",
+                            READ_BOTH_SENTENCE_FIRST to "都读·先例句",
+                        ).forEach { (v, label) ->
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.fillMaxWidth().clickable { state.updateReadMode(v) }
+                            ) {
+                                RadioButton(selected = state.readMode == v, onClick = { state.updateReadMode(v) })
+                                Text(label)
+                            }
+                        }
+
+                        Spacer(Modifier.height(8.dp))
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
+                        Spacer(Modifier.height(8.dp))
+
+                        Text("单词朗读遍数", fontWeight = FontWeight.Medium)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            (1..6).forEach { n ->
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.clickable { state.updateWordRepeat(n) }.padding(end = 2.dp)
+                                ) {
+                                    RadioButton(selected = state.wordRepeat == n, onClick = { state.updateWordRepeat(n) })
+                                    Text("$n", fontSize = 14.sp)
+                                }
+                            }
+                        }
+
+                        Spacer(Modifier.height(4.dp))
+                        Text("例句朗读遍数", fontWeight = FontWeight.Medium)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            (1..3).forEach { n ->
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.clickable { state.updateSentenceRepeat(n) }.padding(end = 4.dp)
+                                ) {
+                                    RadioButton(selected = state.sentenceRepeat == n, onClick = { state.updateSentenceRepeat(n) })
+                                    Text("$n", fontSize = 14.sp)
+                                }
+                            }
+                        }
+
+                        Spacer(Modifier.height(8.dp))
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth()
+                                .clickable { state.updateShowTransWhileRead(!state.showTransWhileRead) }
+                        ) {
+                            Checkbox(
+                                checked = state.showTransWhileRead,
+                                onCheckedChange = { state.updateShowTransWhileRead(it) }
+                            )
+                            Spacer(Modifier.width(4.dp))
+                            Text("自动朗读时显示翻译")
+                        }
+                        Text(
+                            "（遍数仅自动朗读 ▶ 时生效）",
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { showReadSettings = false; refocus() }) { Text("完成") }
+                }
+            )
+        }
+
         Box(
             modifier = Modifier
                 .fillMaxSize()
@@ -170,11 +323,17 @@ fun App(
                         crossBookFilter = state.crossBookFilter,
                         onCrossBookFilterChange = { state.updateCrossBookFilter(it); refocus() },
                         readMode = state.readMode,
-                        onReadModeChange = { state.updateReadMode(it); refocus() },
+                        onOpenReadSettings = { showReadSettings = true },
+                        autoPlaying = state.autoPlaying,
+                        onToggleAuto = { state.toggleAuto(); refocus() },
                         autoTransparent = state.autoTransparent,
                         onAutoTransparentChange = { state.updateAutoTransparent(it); refocus() },
+                        bluetoothOnly = state.bluetoothOnly,
+                        onBluetoothOnlyChange = { state.updateBluetoothOnly(it); refocus() },
                         index = state.currentIndex, total = words.size, elapsed = state.elapsed,
                         onDock = onDock,
+                        onMinimize = onMinimize,
+                        onMaximize = onMaximize,
                         onClose = onClose,
                         onExport = { doExport(); refocus() },
                         onImport = { doImport(); refocus() },
@@ -357,10 +516,14 @@ private fun GuessTopBar(
     book: WordBook, onBookChange: (WordBook) -> Unit,
     filterMode: Int, onFilterModeChange: (Int) -> Unit,
     crossBookFilter: Boolean, onCrossBookFilterChange: (Boolean) -> Unit,
-    readMode: Int, onReadModeChange: (Int) -> Unit,
+    readMode: Int, onOpenReadSettings: () -> Unit,
+    autoPlaying: Boolean, onToggleAuto: () -> Unit,
     autoTransparent: Boolean, onAutoTransparentChange: (Boolean) -> Unit,
+    bluetoothOnly: Boolean, onBluetoothOnlyChange: (Boolean) -> Unit,
     index: Int, total: Int, elapsed: Int,
     onDock: () -> Unit,
+    onMinimize: (() -> Unit)? = null,
+    onMaximize: (() -> Unit)? = null,
     onClose: (() -> Unit)?,
     onExport: () -> Unit, onImport: () -> Unit,
 ) {
@@ -405,23 +568,12 @@ private fun GuessTopBar(
                     else MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
-            // 朗读模式下拉
-            var rmMenu by remember { mutableStateOf(false) }
+            // 朗读设置（朗读方式 + 遍数 + 显示翻译，弹窗）
             val rmLabel = when (readMode) {
                 READ_WORD_ONLY -> "读词"; READ_SENTENCE_ONLY -> "读句"
                 READ_BOTH_SENTENCE_FIRST -> "句+词"; else -> "词+句"
             }
-            Box {
-                TextButton(onClick = { rmMenu = true }) { Text("朗读·$rmLabel") }
-                DropdownMenu(expanded = rmMenu, onDismissRequest = { rmMenu = false }) {
-                    listOf(
-                        READ_WORD_ONLY to "只读单词", READ_SENTENCE_ONLY to "只读例句",
-                        READ_BOTH_WORD_FIRST to "都读·先单词", READ_BOTH_SENTENCE_FIRST to "都读·先例句",
-                    ).forEach { (v, label) ->
-                        DropdownMenuItem(text = { Text(label) }, onClick = { onReadModeChange(v); rmMenu = false })
-                    }
-                }
-            }
+            TextButton(onClick = onOpenReadSettings) { Text("朗读·$rmLabel") }
             // 同步下拉（导出/导入 JSON，与 Android 互通）
             var syncMenu by remember { mutableStateOf(false) }
             Box {
@@ -432,6 +584,23 @@ private fun GuessTopBar(
                     DropdownMenuItem(text = { Text("导入进度…") },
                         onClick = { syncMenu = false; onImport() })
                 }
+            }
+            // 自动连续朗读 ▶/⏸（仅普通窗口在最前时运行）
+            TextButton(onClick = onToggleAuto) {
+                Text(
+                    if (autoPlaying) "⏸" else "▶",
+                    fontSize = 18.sp,
+                    color = if (autoPlaying) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            // 仅蓝牙耳机才朗读 开关（防外放）
+            TextButton(onClick = { onBluetoothOnlyChange(!bluetoothOnly) }) {
+                Text(
+                    if (bluetoothOnly) "仅蓝牙·开" else "仅蓝牙·关",
+                    color = if (bluetoothOnly) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
             // 鼠标离开自动透明 开关
             TextButton(onClick = { onAutoTransparentChange(!autoTransparent) }) {
@@ -446,6 +615,18 @@ private fun GuessTopBar(
             val m = elapsed / 60; val s = elapsed % 60
             Text("$m:${"%02d".format(s)}", style = MaterialTheme.typography.bodySmall,
                 modifier = Modifier.padding(end = 8.dp))
+            // 最小化按钮（无标题栏模式下代替系统黄色按钮，一键收到 Dock）
+            if (onMinimize != null) {
+                TextButton(onClick = onMinimize) {
+                    Text("—", color = MaterialTheme.colorScheme.onSurfaceVariant, fontWeight = FontWeight.Bold)
+                }
+            }
+            // 最大化/还原按钮（无标题栏模式下代替系统绿色按钮，点击铺满屏幕，再点还原）
+            if (onMaximize != null) {
+                TextButton(onClick = onMaximize) {
+                    Text("▢", color = MaterialTheme.colorScheme.onSurfaceVariant, fontWeight = FontWeight.Bold)
+                }
+            }
             // 关闭按钮（无标题栏模式下代替系统红绿灯）
             if (onClose != null) {
                 TextButton(onClick = onClose) {

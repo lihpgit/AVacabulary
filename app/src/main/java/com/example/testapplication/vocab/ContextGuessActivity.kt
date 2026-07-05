@@ -34,6 +34,7 @@ import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.SpanStyle
@@ -68,9 +69,12 @@ class ContextGuessActivity : ComponentActivity() {
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         enableEdgeToEdge()
 
-        // 平板（最小宽度 >= 600dp）跟随系统旋转；手机锁竖屏
+        // 平板（最小宽度 >= 600dp）跟随系统旋转；
+        // 手机由用户在猜词页内手动切换横/竖屏（持久化，默认竖屏），不跟随系统传感器。
         requestedOrientation = if (resources.configuration.smallestScreenWidthDp >= 600) {
             ActivityInfo.SCREEN_ORIENTATION_USER
+        } else if (MMKV.mmkvWithID("context_guess_prefs").decodeBool("landscape", false)) {
+            ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
         } else {
             ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
         }
@@ -112,6 +116,10 @@ fun ContextGuessScreen(
     val nrSnapshot = remember(bookId, filterType) { repository.notRecognized.value }
     val prefs = remember { MMKV.mmkvWithID("context_guess_prefs") }
     val scope = rememberCoroutineScope()
+
+    // 横竖屏（仅手机；平板由系统自由旋转，不显示切换入口）：用户手动切换并持久化，默认竖屏
+    val isPhoneDevice = LocalConfiguration.current.smallestScreenWidthDp < 600
+    var landscape by remember { mutableStateOf(prefs.decodeBool("landscape", false)) }
 
     // 朗读模式（持久化）：0=只读单词 1=只读例句 2=都读·先单词 3=都读·先例句
     var readMode by remember { mutableIntStateOf(prefs.decodeInt("read_mode", READ_BOTH_WORD_FIRST)) }
@@ -432,6 +440,23 @@ fun ContextGuessScreen(
                     }
                 },
                 actions = {
+                    // 横/竖屏切换入口（仅手机显示；文字为“点按后将切换到的目标方向”）
+                    if (isPhoneDevice) {
+                        Text(
+                            text = if (landscape) "竖屏" else "横屏",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier
+                                .clickable {
+                                    landscape = !landscape
+                                    prefs.encode("landscape", landscape)
+                                    (context as? ContextGuessActivity)?.requestedOrientation =
+                                        if (landscape) ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+                                        else ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+                                }
+                                .padding(horizontal = 6.dp, vertical = 4.dp)
+                        )
+                    }
                     // 朗读模式入口
                     val readLabel = when (readMode) {
                         READ_WORD_ONLY -> "读词"
@@ -484,6 +509,8 @@ fun ContextGuessScreen(
         ) {
             val density = LocalDensity.current
             val isTablet = minOf(maxWidth, maxHeight) >= 600.dp
+            // 手机横屏：宽而矮，单列布局整体放大字号（单词尤为明显），靠竖向滚动容纳例句/释义
+            val isPhoneLandscape = !isTablet && maxWidth > maxHeight
             val maxWpx = with(density) { maxWidth.toPx() }
             val maxHpx = with(density) { maxHeight.toPx() }
             val btnPx  = with(density) { 56.dp.toPx() }
@@ -685,15 +712,18 @@ fun ContextGuessScreen(
                         .padding(horizontal = 16.dp, vertical = 20.dp),
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
-                    // 单词（大字）
-                    ContextGuessWordText(word = word.word)
+                    // 单词（大字；横屏更大）
+                    ContextGuessWordText(
+                        word = word.word,
+                        initialSize = if (isPhoneLandscape) 120f else 72f,
+                    )
 
                     // 音标
                     if (displayAccent.isNotBlank()) {
                         Spacer(Modifier.height(8.dp))
                         Text(
                             text = displayAccent,
-                            fontSize = 20.sp,
+                            fontSize = if (isPhoneLandscape) 28.sp else 20.sp,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             textAlign = TextAlign.Center
                         )
@@ -712,8 +742,8 @@ fun ContextGuessScreen(
                         )
                         Text(
                             text = annotated,
-                            fontSize = 20.sp,
-                            lineHeight = 29.sp,
+                            fontSize = if (isPhoneLandscape) 30.sp else 20.sp,
+                            lineHeight = if (isPhoneLandscape) 42.sp else 29.sp,
                             textAlign = TextAlign.Start,
                             modifier = Modifier.fillMaxWidth()
                         )
@@ -747,8 +777,8 @@ fun ContextGuessScreen(
                             if (displayMeanCn.isNotBlank()) {
                                 Text(
                                     text = displayMeanCn,
-                                    fontSize = 24.sp,
-                                    lineHeight = 32.sp,
+                                    fontSize = if (isPhoneLandscape) 34.sp else 24.sp,
+                                    lineHeight = if (isPhoneLandscape) 44.sp else 32.sp,
                                     fontWeight = FontWeight.Medium,
                                     color = MaterialTheme.colorScheme.primary,
                                     textAlign = TextAlign.Center,
@@ -761,8 +791,8 @@ fun ContextGuessScreen(
                                 Spacer(Modifier.height(10.dp))
                                 Text(
                                     text = displayMeanEn,
-                                    fontSize = 16.sp,
-                                    lineHeight = 22.sp,
+                                    fontSize = if (isPhoneLandscape) 22.sp else 16.sp,
+                                    lineHeight = if (isPhoneLandscape) 30.sp else 22.sp,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     textAlign = TextAlign.Center,
                                     modifier = Modifier.fillMaxWidth()
@@ -774,8 +804,8 @@ fun ContextGuessScreen(
                                 Spacer(Modifier.height(14.dp))
                                 Text(
                                     text = displaySentenceTrans,
-                                    fontSize = 16.sp,
-                                    lineHeight = 22.sp,
+                                    fontSize = if (isPhoneLandscape) 22.sp else 16.sp,
+                                    lineHeight = if (isPhoneLandscape) 30.sp else 22.sp,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     textAlign = TextAlign.Start,
                                     modifier = Modifier.fillMaxWidth()

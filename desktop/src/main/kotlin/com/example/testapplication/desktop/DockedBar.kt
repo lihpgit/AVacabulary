@@ -143,6 +143,11 @@ fun DockedBar(
                         Modifier.weight(1f).clickable { state.toggleReveal() },
                         verticalArrangement = Arrangement.Center,
                     ) {
+                        // 朗读被拦截（未连蓝牙）时的提示
+                        state.audioHint?.let { hint ->
+                            Text(hint, color = Color(0xFFFFB74D), fontSize = 22.sp)
+                            Spacer(Modifier.height(2.dp))
+                        }
                         if (currentWord == null) {
                             Text("没有单词", color = DOCK_DIM, fontSize = 40.sp)
                         } else {

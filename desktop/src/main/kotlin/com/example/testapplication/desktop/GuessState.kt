@@ -15,6 +15,7 @@ import com.example.testapplication.vocab.parseZpkSentences
 import com.example.testapplication.vocab.wordAudioBytesFromZpk
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
@@ -64,12 +65,36 @@ class GuessState(
     /** 普通窗口：鼠标离开后是否自动变透明（默认开） */
     var autoTransparent by mutableStateOf(prefs.getInt("auto_transparent", 1) == 1)
 
+    /** 自动连续朗读（仅普通窗口在最前时运行）：读完当前词自动翻下一词、循环；失焦/没蓝牙即停。 */
+    var autoPlaying by mutableStateOf(false)
+    /** 单词朗读遍数（自动朗读时生效），1–6，持久化 */
+    var wordRepeat by mutableStateOf(prefs.getInt("word_repeat_count", 1).coerceIn(1, 6))
+    /** 例句朗读遍数（自动朗读时生效），1–3，持久化 */
+    var sentenceRepeat by mutableStateOf(prefs.getInt("sentence_repeat_count", 1).coerceIn(1, 3))
+    /** 自动朗读时是否自动翻面显示翻译，持久化 */
+    var showTransWhileRead by mutableStateOf(prefs.getInt("show_trans_while_read", 0) == 1)
+
+    /** 仅蓝牙耳机才朗读（防外放）：默认开。关闭后任何输出设备都可朗读（在家用扬声器） */
+    var bluetoothOnly by mutableStateOf(prefs.getInt("bluetooth_only", 1) == 1)
+    /** 后台轮询缓存：当前默认音频输出设备是否为蓝牙（勿在 EDT 直接探测） */
+    @Volatile private var btOutputConnected = false
+    /** 是否允许朗读：未开「仅蓝牙」或当前输出已是蓝牙 */
+    private fun audioAllowed(): Boolean = !bluetoothOnly || btOutputConnected
+
+    /** 朗读被拦截时给 UI 的瞬时提示（普通窗口 + 贴底条共用，自动清空）；tick 用于让 snackbar 重复触发 */
+    var audioHint by mutableStateOf<String?>(null)
+    var audioHintTick by mutableStateOf(0)
+    private var hintJob: Job? = null
+    private var uiScope: CoroutineScope? = null
+
     var allWords by mutableStateOf<List<Word>>(emptyList())
     var loading by mutableStateOf(true)
     var bookTopicIds by mutableStateOf<Map<WordBook, Set<Int>>>(emptyMap())
 
     var currentIndex by mutableIntStateOf(0)
     var revealed by mutableStateOf(false)
+    /** 自动朗读时用户手动翻面查看翻译 → 暂停翻下一词；翻回单词/例句面再继续 */
+    private var autoPausedForReveal by mutableStateOf(false)
 
     var zpkFiles by mutableStateOf<Map<String, ByteArray>?>(null)
     var zpkMeta by mutableStateOf<ZpkMeta?>(null)
@@ -128,7 +153,21 @@ class GuessState(
     fun updateFilterMode(v: Int) { filterMode = v; prefs.putInt("filter_mode", v) }
 
     // ── 朗读 ──
+    private companion object {
+        const val BT_HINT = "🎧 请连接蓝牙耳机后再朗读"
+        const val AUTO_GAP_MS = 700L   // 自动朗读：读完一个词到翻下一词之间的停顿
+    }
+
+    /** 显示一条瞬时朗读提示（2.5s 后自动清空），普通窗口与贴底条都会读取。 */
+    fun showAudioHint(msg: String) {
+        audioHint = msg
+        audioHintTick++
+        hintJob?.cancel()
+        hintJob = uiScope?.launch { delay(2500); audioHint = null }
+    }
+
     fun playWord(onComplete: (() -> Unit)? = null) {
+        if (!audioAllowed()) { showAudioHint(BT_HINT); if (autoPlaying) stopAuto(); return }
         val bytes = zpkFiles?.let { wordAudioBytesFromZpk(it) }
         println("[AUD] playWord word=${currentWord?.word} bytes=${bytes?.size ?: -1} hasCb=${onComplete != null}")
         if (bytes != null) audio.play(bytes, "${currentWord?.word} word", onComplete)
@@ -136,6 +175,7 @@ class GuessState(
     }
 
     fun playSentence(onComplete: (() -> Unit)? = null) {
+        if (!audioAllowed()) { showAudioHint(BT_HINT); if (autoPlaying) stopAuto(); return }
         val key = sentences.getOrNull(sentenceIdx)?.audio
             ?: zpkMeta?.sentenceAudio?.takeIf { it.isNotBlank() }
         val bytes = key?.let { zpkFiles?.get(it) }
@@ -144,29 +184,71 @@ class GuessState(
         else { audio.stop(); onComplete?.invoke() }
     }
 
+    /**
+     * 按 [readMode] 朗读当前词（每次切词都会调一次）。自动朗读时按遍数重复、读完自动翻下一词循环；
+     * 非自动时只读一遍（行为同改前）。词被切换则当前序列自动作废（collectLatest 会重启）。
+     */
     fun autoPlay() {
         val tid = currentWord?.topicId ?: return
-        println("[AUD] autoPlay mode=$readMode tid=$tid word=${currentWord?.word}")
-        when (readMode) {
-            READ_WORD_ONLY -> playWord()
-            READ_SENTENCE_ONLY -> playSentence()
-            READ_BOTH_SENTENCE_FIRST -> playSentence {
-                val ok = currentWord?.topicId == tid
-                println("[AUD] sent-done -> chain word? match=$ok (cur=${currentWord?.topicId} tid=$tid)")
-                if (ok) playWord()
-            }
-            else -> playWord {
-                val ok = currentWord?.topicId == tid
-                println("[AUD] word-done -> chain sent? match=$ok (cur=${currentWord?.topicId} tid=$tid)")
-                if (ok) playSentence()
-            }
+        // 自动朗读且开启“朗读时显示翻译” → 自动翻面（不标“不认识”，被动听不该污染状态）
+        if (autoPlaying && showTransWhileRead) revealed = true
+        val wc = if (autoPlaying) wordRepeat else 1
+        val sc = if (autoPlaying) sentenceRepeat else 1
+        val steps: List<Boolean> = when (readMode) {   // true=读单词 false=读例句
+            READ_WORD_ONLY -> List(wc) { true }
+            READ_SENTENCE_ONLY -> List(sc) { false }
+            READ_BOTH_SENTENCE_FIRST -> List(sc) { false } + List(wc) { true }
+            else -> List(wc) { true } + List(sc) { false }
+        }
+        fun runStep(i: Int) {
+            if (currentWord?.topicId != tid) return        // 词已切换，放弃本序列
+            if (i >= steps.size) { onAutoSequenceDone(tid); return }
+            val next = { runStep(i + 1) }
+            if (steps[i]) playWord(next) else playSentence(next)
+        }
+        runStep(0)
+    }
+
+    /** 一个词的朗读序列读完：若仍在自动朗读且未切词，停顿后翻下一词（goNext 回环 → 无缝循环）。 */
+    private fun onAutoSequenceDone(tid: Int) {
+        if (!autoPlaying || currentWord?.topicId != tid) return
+        uiScope?.launch {
+            delay(AUTO_GAP_MS)
+            if (!autoPlaying || currentWord?.topicId != tid) return@launch
+            // 用户手动翻面查看翻译中（非“朗读时显示翻译”模式）→ 暂停翻页，等翻回单词面再继续
+            if (revealed && !showTransWhileRead) { autoPausedForReveal = true; return@launch }
+            goNext()
         }
     }
+
+    /** ▶/⏸ 切换自动朗读。 */
+    fun toggleAuto() { if (autoPlaying) stopAuto() else startAuto() }
+
+    /** 开始自动朗读：没蓝牙（仅蓝牙模式）则只提示不启动。 */
+    fun startAuto() {
+        if (autoPlaying) return
+        if (!audioAllowed()) { showAudioHint(BT_HINT); return }
+        autoPlaying = true
+        autoPlay()
+    }
+
+    /** 停止自动朗读（失焦/没蓝牙/点⏸都会调）：打断当前朗读，需手动 ▶ 重启。 */
+    fun stopAuto() {
+        if (!autoPlaying) return
+        autoPlaying = false
+        autoPausedForReveal = false
+        audio.stop()
+    }
+
+    fun updateWordRepeat(v: Int) { wordRepeat = v.coerceIn(1, 6); prefs.putInt("word_repeat_count", wordRepeat) }
+    fun updateSentenceRepeat(v: Int) { sentenceRepeat = v.coerceIn(1, 3); prefs.putInt("sentence_repeat_count", sentenceRepeat) }
+    fun updateShowTransWhileRead(v: Boolean) { showTransWhileRead = v; prefs.putInt("show_trans_while_read", if (v) 1 else 0) }
 
     // 离开当前词：仅隐藏翻译。
     // 「不认识」不再随浏览自动移除——只有点「斩」才会移出（移到已斩）。
     private fun leaveCurrentWord() {
         revealed = false
+        autoPausedForReveal = false
     }
 
     // ── 导航 ──
@@ -186,6 +268,10 @@ class GuessState(
         // 查看翻译 → 标记“不认识”
         if (revealed) {
             currentWord?.let { markNotRecognized(it.topicId) }
+        } else if (autoPlaying && autoPausedForReveal) {
+            // 翻回单词/例句面 → 恢复自动朗读，翻下一词
+            autoPausedForReveal = false
+            goNext()
         }
     }
 
@@ -204,9 +290,22 @@ class GuessState(
     fun updateReadMode(v: Int) { readMode = v; prefs.putInt("read_mode", v) }
     fun updateCrossBookFilter(v: Boolean) { crossBookFilter = v; prefs.putInt("cross_book_filter", if (v) 1 else 0) }
     fun updateAutoTransparent(v: Boolean) { autoTransparent = v; prefs.putInt("auto_transparent", if (v) 1 else 0) }
+    /** 切换「仅蓝牙耳机才朗读」并持久化（key `bluetooth_only`）。 */
+    fun updateBluetoothOnly(v: Boolean) { bluetoothOnly = v; prefs.putInt("bluetooth_only", if (v) 1 else 0) }
 
     // ── 响应式副作用（在后台 scope 启动一次，避免占用 UI 线程）──
     fun start(scope: CoroutineScope) {
+        uiScope = scope
+        // 后台轮询当前默认音频输出是否为蓝牙（缓存供朗读时即时判定，绝不在 EDT 探测）。
+        // 首次立即探测，之后每 3s 一次；连/断蓝牙后最多 3s 内生效。
+        scope.launch(Dispatchers.IO) {
+            while (true) {
+                // 开关关闭时无需探测（audioAllowed 已短路放行），省去每 3s 一次的子进程开销
+                if (bluetoothOnly) btOutputConnected = MacAudioOutput.isBluetoothOutputActive()
+                delay(3000)
+            }
+        }
+
         // 启动即在后台把 zpk 索引建好 + 加载跨词书集合
         scope.launch(Dispatchers.IO) { repo.prewarmIndex() }
         scope.launch { bookTopicIds = withContext(Dispatchers.IO) { repo.bookTopicIds() } }

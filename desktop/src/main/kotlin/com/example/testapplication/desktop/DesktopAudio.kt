@@ -113,6 +113,10 @@ class DesktopAudio {
             // fmt: audioFormat(2) channels(2) sampleRate(4) byteRate(4) blockAlign(2) bits(2)
             val sampleRate = le32(fmt, 4)
             val blockAlign = le16(fmt, 12)
+            // afconvert 对部分音频会输出 WAVE_FORMAT_EXTENSIBLE（audioFormat=0xFFFE，fmt 40字节）。
+            // 下面只写 16 字节 fmt，若原样保留 0xFFFE 会得到「声称 EXTENSIBLE 却缺扩展字段」的畸形头，
+            // afplay 偶现 exit=1 拒播。-d LEI16 保证是 16bit 线性 PCM，强制 audioFormat=1（PCM）即正确。
+            val pcmFmt = fmt.copyOf(16).also { it[0] = 0x01; it[1] = 0x00 }
             val silenceBytes = (sampleRate.toLong() * SILENCE_MS / 1000).toInt() * blockAlign
             val newDataLen = silenceBytes + dataLen
 
@@ -124,7 +128,7 @@ class DesktopAudio {
                     ((v ushr 16) and 0xFF).toByte(), ((v ushr 24) and 0xFF).toByte()
                 ))
                 s("RIFF"); i32(36 + newDataLen); s("WAVE")
-                s("fmt "); i32(16); o.write(fmt, 0, 16)
+                s("fmt "); i32(16); o.write(pcmFmt, 0, 16)
                 s("data"); i32(newDataLen)
                 o.write(ByteArray(silenceBytes))           // 前置静音
                 o.write(wav, dataOff, dataLen)              // 原始 PCM 数据
